@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <PropertyGroup>
+    <_ProjectFileVersion>10.0.30319.1</_ProjectFileVersion>
+    <OutDir>$(SolutionDir)\$(Configuration)\</OutDir>
+    <IntDir>$(SolutionDir)\_work\intermediate\$(Configuration)\$(ProjectName)\</IntDir>
+    <LinkIncremental>false</LinkIncremental>
+    <TargetName>DeusEx</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <AdditionalIncludeDirectories>../games/DeusEx/engine/inc;../games/DeusEx/core/inc;../games/DeusEx/window/inc;../games/DeusEx/deusex/inc;../games/DeusEx/extension/inc;../detours;../external/SDL3/include;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <!-- PROJECTNAME=L"DeusExe" intentionally hardcoded: this names the section in users' DeusEx.ini.
+           Derived from $(ProjectName) would silently orphan existing user settings after the rename. -->
+      <PreprocessorDefinitions>PROJECTNAME=L"DeusExe";_USE_MATH_DEFINES;NOMINMAX;_REALLY_WANT_DEBUG;WINDOWS_IGNORE_PACKING_MISMATCH;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <StructMemberAlignment>4Bytes</StructMemberAlignment>
+      <TreatWChar_tAsBuiltInType>false</TreatWChar_tAsBuiltInType>
+      <WarningLevel>Level4</WarningLevel>
+      <TreatWarningAsError>true</TreatWarningAsError>
+      <DisableSpecificWarnings>4121;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <EnforceTypeConversionRules>true</EnforceTypeConversionRules>
+      <ConformanceMode>false</ConformanceMode>
+      <ForceConformanceInForLoopScope>false</ForceConformanceInForLoopScope>
+      <LanguageStandard>Default</LanguageStandard>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>uxtheme.lib;Shlwapi.lib;Comctl32.lib;SDL3.lib;delayimp.lib;../games/DeusEx/engine/lib/engine.lib;../games/DeusEx/core/lib/core.lib;../games/DeusEx/extension/lib/extension.lib;../games/DeusEx/window/lib/window.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>../external/SDL3/lib/x86;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <BaseAddress>
+      </BaseAddress>
+      <OutputFile>$(OutDir)DeusEx.exe</OutputFile>
+      <DataExecutionPrevention>false</DataExecutionPrevention>
+      <StackReserveSize>2097152</StackReserveSize>
+      <LargeAddressAware>true</LargeAddressAware>
+      <DelayLoadDLLs>SDL3.dll;%(DelayLoadDLLs)</DelayLoadDLLs>
+    </Link>
+    <PreBuildEvent>
+      <Command>
+      </Command>
+    </PreBuildEvent>
+  </ItemDefinitionGroup>
+</Project>

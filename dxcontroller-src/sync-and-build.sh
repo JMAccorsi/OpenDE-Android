@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# Sync DXController/ and DeusEx/ overlays to the game build dir, then
+# build DeusEx.u and DXController.u.
+#
+# Layout:
+#   $REPO_DIR/DXController/Classes/*.uc   — our package's sources
+#   $REPO_DIR/DeusEx/Classes/*.uc         — overlay edits to stock DeusEx
+#
+# The DeusEx overlay assumes $BUILD_DIR/DeusEx/Classes/ already contains
+# the full stock source (from a one-time
+# `ucc batchexport DeusEx.u Class uc ..\DeusEx\Classes` run). Our overlay
+# just replaces specific files; the rest of the stock tree stays as-is.
+#
+# Build flow:
+#   1-2. convert the overlay .uc sources (DXController/, DeusEx/) into
+#        the build dir, LF -> CRLF. The repo stores .uc as LF; the
+#        ancient UCC.exe wants CRLF-terminated source, so each file is
+#        passed through `unix2dos -n` on the way in.
+#   3. wipe+recreate $BUILD_DIR/DXController, sync overlay .uc, then
+#      generate textures (gen-wheel.py + png-to-pcx.py) into
+#      DXController/Textures/ for the #exec imports in DXControllerTextures.uc
+#   4. delete DeusEx.u; `echo n | UCC.exe make`. UCC prompts to overwrite
+#      DeusEx/Inc/DeusExClasses.h; we answer 'n'. UCC subsequently crashes
+#      while loading the freshly-rebuilt DeusEx.u (the load happens before
+#      DXController compiles). DeusEx.u is written before the crash.
+#      `|| true` swallows the exit code; the `-f` check is the real
+#      success signal.
+#   5. delete DXController.u; fresh `UCC.exe make`. DeusEx.u exists
+#      (no rebuild, no crash), then DXController.u is built against it.
+#
+# Requires `unix2dos` (from the dos2unix package) on PATH — run under
+# `nix develop`, which provides it, or install dos2unix.
+#
+# Usage:
+#   ./sync-and-build.sh          # sync + build
+#   ./sync-and-build.sh -n       # dry run (list files, skip build)
+#   BUILD_DIR=/path ./sync-and-build.sh
+
+set -euo pipefail
+
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+BUILD_DIR="${BUILD_DIR:-$REPO_DIR/gamedir}"
+
+DRY_RUN=0
+if [[ "${1:-}" == "-n" || "${1:-}" == "--dry-run" ]]; then
+    DRY_RUN=1
+fi
+
+if [[ ! -d "$BUILD_DIR" ]]; then
+    echo "sync-and-build: build dir not found: $BUILD_DIR" >&2
+    exit 1
+fi
+
+# Wipe and recreate the DXController package dir so obsolete scripts or
+# textures from a prior build can't linger. Scoped to DXController/ only —
+# DeusEx/ (the full stock-source overlay, which we do not reconstruct here)
+# is left untouched. Done before the overlay sync and the texture generation
+# below, both of which write into this tree.
+if (( DRY_RUN )); then
+    echo "sync-and-build: (dry-run) would wipe and recreate $BUILD_DIR/DXController"
+else
+    rm -rf "$BUILD_DIR/DXController"
+    mkdir -p "$BUILD_DIR/DXController/Classes"
+fi
+
+# Sync the overlay .uc sources into the build dir, converting LF -> CRLF
+# on the way. The repo stores .uc as LF, but the ancient UCC.exe expects
+# CRLF-terminated source. `unix2dos -n` reads the LF source and writes a
+# CRLF copy straight to the destination — no rsync, no post-pass over the
+# build dir, so the full stock DeusEx/Classes/ tree is never touched.
+for pkg in DXController DeusEx; do
+    src="$REPO_DIR/$pkg/Classes"
+    dst="$BUILD_DIR/$pkg/Classes"
+    (( DRY_RUN )) || mkdir -p "$dst"
+    for f in "$src"/*.uc; do
+        [[ -e "$f" ]] || continue
+        if (( DRY_RUN )); then
+            echo "sync-and-build: (dry-run) would convert $f -> $dst/$(basename "$f")"
+        else
+            unix2dos -n "$f" "$dst/$(basename "$f")"
+        fi
+    done
+done
+
+# A DeusEx overlay file removed from the repo would otherwise linger in the
+# build dir with its old edits (the stock tree is never reconstructed here)
+# and silently keep compiling into DeusEx.u. A manifest of what was synced
+# lets the next run catch that: restore the stock copy when the sister
+# export is available, else fail so it can't go unnoticed.
+DEUSEX_DST="$BUILD_DIR/DeusEx/Classes"
+MANIFEST="$DEUSEX_DST/.dxc-overlay-files"
+STOCK_SRC="$REPO_DIR/../deusex-scripts/DeusEx/Classes"
+if (( ! DRY_RUN )); then
+    if [[ -f "$MANIFEST" ]]; then
+        while IFS= read -r name; do
+            [[ -n "$name" && ! -f "$REPO_DIR/DeusEx/Classes/$name" ]] || continue
+            if [[ -f "$STOCK_SRC/$name" ]]; then
+                cp "$STOCK_SRC/$name" "$DEUSEX_DST/$name"
+                echo "sync-and-build: restored $name to stock (no longer in the repo overlay)"
+            else
+                echo "sync-and-build: ERROR: $name was overlaid by a previous build but is gone from DeusEx/Classes/; restore the stock copy into $DEUSEX_DST before building" >&2
+                exit 1
+            fi
+        done < "$MANIFEST"
+    fi
+    ls "$REPO_DIR/DeusEx/Classes"/*.uc 2>/dev/null | xargs -rn1 basename > "$MANIFEST"
+fi
+
+# Generate the texture set and convert to the 8-bit PCX the package import
+# expects, writing into DXController/Textures/. The #exec lines in
+# DXControllerTextures.uc reference FILE=Textures\<name>.pcx (relative to
+# the package dir). The wheel art is generated fresh by gen-wheel.py; the
+# button glyphs are committed PNGs under assets/XboxSeries/.
+TEXDIR="$BUILD_DIR/DXController/Textures"
+if (( DRY_RUN )); then
+    echo "sync-and-build: (dry-run) would generate textures into $TEXDIR"
+else
+    WHEELSRC="$(mktemp -d)"
+    MENUBGSRC="$(mktemp -d)"
+    VEILSRC="$(mktemp -d)"
+    trap 'rm -rf "$WHEELSRC" "$MENUBGSRC" "$VEILSRC"' EXIT
+    mkdir -p "$TEXDIR"
+    python3 "$REPO_DIR/assets/gen-wheel.py" "$WHEELSRC"
+    python3 "$REPO_DIR/assets/gen-menu-bg.py" "$MENUBGSRC"
+    python3 "$REPO_DIR/assets/gen-veil.py" "$VEILSRC"
+    python3 "$REPO_DIR/assets/png-to-pcx.py" "$REPO_DIR/assets/XboxSeries" "$TEXDIR" --size 64     --mode masked
+    python3 "$REPO_DIR/assets/png-to-pcx.py" "$WHEELSRC"         "$TEXDIR" --size 1024   --mode masked --key black
+    python3 "$REPO_DIR/assets/png-to-pcx.py" "$WHEELSRC/wedges"  "$TEXDIR" --size 1024   --mode grey
+    python3 "$REPO_DIR/assets/png-to-pcx.py" "$WHEELSRC/veil"    "$TEXDIR" --size 1024   --mode grey
+    # Menu-bg tiles are 256x256 PNGs (controller + autosave page sets);
+    # preserve native dims so png-to-pcx doesn't square-resize them against
+    # the default --size 64.
+    python3 "$REPO_DIR/assets/png-to-pcx.py" "$MENUBGSRC"        "$TEXDIR" --size native --mode grey
+    python3 "$REPO_DIR/assets/png-to-pcx.py" "$VEILSRC"          "$TEXDIR" --size native --mode grey
+    echo "sync-and-build: generated textures into $TEXDIR"
+fi
+
+# Register DXController in DeusEx.ini's EditPackages list. UCC walks
+# this list to decide what to build; without this entry, `UCC make`
+# doesn't pick up DXController.uc. Insert directly after
+# `EditPackages=DeusEx` so DXController compiles after the overlay
+# rebuild. The ini ships CRLF; the sed pattern anchors on `\r$` so
+# `EditPackages=DeusExUI` etc. don't match, and the replacement
+# preserves CRLF on both lines.
+DEUSEX_INI="$BUILD_DIR/System/DeusEx.ini"
+if (( DRY_RUN )); then
+    echo "sync-and-build: (dry-run) would ensure EditPackages=DXController is registered in $DEUSEX_INI"
+else
+    if [[ ! -f "$DEUSEX_INI" ]]; then
+        echo "sync-and-build: DeusEx.ini not found at $DEUSEX_INI" >&2
+        exit 1
+    fi
+    if ! grep -q '^EditPackages=DXController' "$DEUSEX_INI"; then
+        sed -i 's/^EditPackages=DeusEx\r$/EditPackages=DeusEx\r\nEditPackages=DXController\r/' "$DEUSEX_INI"
+        if ! grep -q '^EditPackages=DXController' "$DEUSEX_INI"; then
+            echo "sync-and-build: failed to insert EditPackages=DXController into $DEUSEX_INI" >&2
+            exit 1
+        fi
+        echo "sync-and-build: registered EditPackages=DXController in DeusEx.ini"
+    fi
+fi
+
+# Build the native launcher (msbuild via WSL → Windows-side VS).
+# find-msbuild.sh hard-fails if no MSBuild reachable; that's the right
+# behaviour — sync-and-build is the canonical install path and partial
+# installs (stale .exe + fresh .u) hide which side broke.
+MSBUILD="$("$REPO_DIR/launcher/find-msbuild.sh")"
+if (( DRY_RUN )); then
+    echo "sync-and-build: (dry-run) would fetch SDL3 via $REPO_DIR/launcher/fetch-sdl3.sh"
+    echo "sync-and-build: (dry-run) would run msbuild via $MSBUILD"
+    echo "sync-and-build: (dry-run) would run $REPO_DIR/launcher/tests/Release/tests.exe"
+    echo "sync-and-build: (dry-run) would install DeusEx.exe + DeusEx.pdb + SDL3.dll to $BUILD_DIR/System/"
+else
+    "$REPO_DIR/launcher/fetch-sdl3.sh"
+    "$MSBUILD" "$(wslpath -w "$REPO_DIR/launcher/launcher.sln")" \
+        -p:Configuration=Release -p:Platform=Win32 \
+        -m -verbosity:minimal -nologo
+    # The solution build compiles tests.vcxproj but msbuild does not run it.
+    # Before the install, so a red test can't leave a fresh .exe in the game dir.
+    "$REPO_DIR/launcher/tests/Release/tests.exe"
+    cp "$REPO_DIR/launcher/Release/DeusEx.exe" "$BUILD_DIR/System/DeusEx.exe"
+    cp "$REPO_DIR/launcher/Release/DeusEx.pdb" "$BUILD_DIR/System/DeusEx.pdb"
+    cp "$REPO_DIR/launcher/external/SDL3/lib/x86/SDL3.dll" "$BUILD_DIR/System/SDL3.dll"
+    echo "sync-and-build: installed DeusEx.exe + DeusEx.pdb + SDL3.dll to $BUILD_DIR/System/"
+fi
+
+if (( DRY_RUN )); then
+    echo "sync-and-build: dry run — skipping .u delete and build"
+    exit 0
+fi
+
+cd "$BUILD_DIR/System"
+
+# Pass 1: rebuild DeusEx.u (tolerate the crash; verify .u landed).
+rm -f "$BUILD_DIR/System/DeusEx.u"
+cmd.exe /c "echo n | UCC.exe make" || true
+echo "sync-and-build: the UCC error above is expected: a stock game bug makes UCC crash after writing DeusEx.u"
+if [[ ! -f "$BUILD_DIR/System/DeusEx.u" ]]; then
+    echo "sync-and-build: DeusEx.u was not produced" >&2
+    exit 1
+fi
+
+# Pass 2: rebuild DXController.u in a fresh UCC process. UCC walks
+# EditPackages, skips DeusEx.u (present), builds DXController.u.
+rm -f "$BUILD_DIR/System/DXController.u"
+cmd.exe /c "UCC.exe make"
+if [[ ! -f "$BUILD_DIR/System/DXController.u" ]]; then
+    echo "sync-and-build: DXController.u was not produced" >&2
+    exit 1
+fi
+
+echo "sync-and-build: ok"

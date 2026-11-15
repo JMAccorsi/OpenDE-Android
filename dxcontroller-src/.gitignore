@@ -1,0 +1,25 @@
+gamedir
+*.swp
+.superpowers/
+
+/docs/superpowers
+/docs/tmp
+
+# Standalone-run output dirs for the asset generators (sync-and-build uses
+# mktemp instead). Kept out of version control because they're regenerated.
+/assets/menu-bg-gen
+/assets/wheel-gen
+
+# Launcher build outputs (MSBuild from launcher/)
+/launcher/Release/
+/launcher/Debug/
+/launcher/_work/
+/launcher/tests/Release/
+/launcher/tests/Debug/
+/launcher/tests/_work/
+/launcher/detours/
+/launcher/external/
+/launcher/.vs/
+/launcher/src/version_generated.h
+*.vcxproj.user
+*.suo

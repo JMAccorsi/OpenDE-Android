@@ -1,0 +1,105 @@
+[Public]
+
+[AutoSaveManager]
+AutoSaveTitle="Salvamento Automático"
+AutoSavingLabel="Salvando automaticamente..."
+
+[MenuScreenController]
+Title="Controle"
+
+[MenuScreenAutoSave]
+Title="Salvamento Automático"
+
+[MenuChoice_InvertLookY]
+actionText="Inverter eixo |&Y"
+helpText="Empurrar o analógico direito para cima olha para baixo em vez de cima. Afeta a visão no jogo e nas câmeras de segurança."
+enumText[0]="Não"
+enumText[1]="Sim"
+
+[MenuChoice_AutoSaveEnabled]
+actionText="Salvamento |&automático"
+helpText="Salva o jogo periodicamente durante a partida. Cada salvamento pode causar uma breve trava - desative se isso incomodar."
+enumText[0]="Desligado"
+enumText[1]="Ligado"
+
+[MenuChoice_AutoSaveInterval]
+actionText="|&Intervalo do autosave"
+helpText="Segundos de jogo entre salvamentos automáticos. Conta apenas o tempo jogando, não em menus ou pausa. Faixa 15-600.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_AutoSaveMaxSaves]
+actionText="|&Autosaves mantidos"
+helpText="Quantos salvamentos automáticos manter. O mais antigo é descartado ao criar um novo. Faixa 1-100.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickScaleRight]
+actionText="|&Sensib. analógico dir."
+helpText="Ajusta a velocidade da câmera. Em 1.00 a inclinação máxima gira na velocidade padrão do jogo; valores menores reduzem.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickDeadzoneLeft]
+actionText="Zona morta |&esq."
+helpText="Zona morta radial em unidades brutas do analógico. Abaixo desse valor considera centrado; acima, reescala a partir de 0. Faixa 0-10000.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickDeadzoneRight]
+actionText="Zona morta |&dir."
+helpText="Zona morta radial em unidades brutas do analógico. Abaixo desse valor considera centrado; acima, reescala a partir de 0. Faixa 0-10000.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveType]
+enumText[0]="Linear"
+enumText[1]="Potência"
+enumText[2]="Exponencial"
+enumText[3]="Sigmoide"
+
+[MenuChoice_StickCurveTypeLeft]
+actionText="|&Curva analógico esq."
+helpText="Formato de resposta após a zona morta. Potência = u^k; Exponencial = mistura de linear e cúbica; Sigmoide = curva em S com ponto médio ajustável."
+enumText[0]="Linear"
+enumText[1]="Potência"
+enumText[2]="Exponencial"
+enumText[3]="Sigmoide"
+
+[MenuChoice_StickCurveTypeRight]
+actionText="C|&urva analógico dir."
+helpText="Formato de resposta após a zona morta. Potência = u^k; Exponencial = mistura de linear e cúbica; Sigmoide = curva em S com ponto médio ajustável."
+enumText[0]="Linear"
+enumText[1]="Potência"
+enumText[2]="Exponencial"
+enumText[3]="Sigmoide"
+
+[MenuChoice_StickCurvePowerLeft]
+actionText="|&Potência esq."
+helpText="Expoente k em u^k. 1.0 = linear; >1 = controle mais fino no centro; <1 = resposta mais rápida no centro.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurvePowerRight]
+actionText="P|&otência dir."
+helpText="Expoente k em u^k. 1.0 = linear; >1 = controle mais fino no centro; <1 = resposta mais rápida no centro.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveExpoLeft]
+actionText="|&Exponencial esq."
+helpText="Mistura expo e: 0.0 = linear, 1.0 = cúbica pura. Maior = mais sensível perto da inclinação máxima.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveExpoRight]
+actionText="Ex|&ponencial dir."
+helpText="Mistura expo e: 0.0 = linear, 1.0 = cúbica pura. Maior = mais sensível perto da inclinação máxima.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveSigmoidMidpointLeft]
+actionText="Ponto médio |&sigm. esq."
+helpText="Posição X da região íngreme. Menor = sensível mais cedo (mais agressivo no geral).  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveSigmoidMidpointRight]
+actionText="Ponto médio s|&igm. dir."
+helpText="Posição X da região íngreme. Menor = sensível mais cedo (mais agressivo no geral).  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveSigmoidSteepnessLeft]
+actionText="Inclinação sigm. esq."
+helpText="Agudeza da curva em S. Maior = transição mais brusca entre zona morta e velocidade máxima.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveSigmoidSteepnessRight]
+actionText="Inclinação sigm. dir."
+helpText="Agudeza da curva em S. Maior = transição mais brusca entre zona morta e velocidade máxima.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveSigmoidStrengthLeft]
+actionText="Força sigmoide esq."
+helpText="Mistura com linear. 0.0 = linear, 1.0 = S puro.  *  LB/RB ajustam mais rápido"
+
+[MenuChoice_StickCurveSigmoidStrengthRight]
+actionText="Força sigmoide dir."
+helpText="Mistura com linear. 0.0 = linear, 1.0 = S puro.  *  LB/RB ajustam mais rápido"
