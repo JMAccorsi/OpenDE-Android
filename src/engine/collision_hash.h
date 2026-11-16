@@ -13,7 +13,7 @@ namespace dx {
         void clear();
         void update(UObject* actor);
         void remove(UObject* actor);
-        void sync(const std::vector<UObject*>& actors);
+        void sync(const std::vector<UObject*>& actors, size_t firstDynamic = 0);
         const std::vector<UObject*>& query(const Vector& boxMin, const Vector& boxMax);
 
     private:
@@ -47,8 +47,10 @@ namespace dx {
         std::vector<uint32_t> alwaysSlots;
         std::vector<uint32_t> found;
         std::vector<UObject*> result;
+        std::vector<UObject*> staleScratch;
         uint64_t nextOrder = 0;
         uint32_t queryStamp = 0;
         uint32_t syncStamp = 0;
+        size_t syncedStaticCount = 0;
     };
 }

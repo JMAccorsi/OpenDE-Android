@@ -34,11 +34,14 @@ public class BootActivity extends Activity {
     private static final int REQ_STORAGE = 1001;
     private static final int REQ_PICK_FOLDER = 1002;
     private static final int REQ_PICK_INSTALLER = 1003;
+    private static final int REQ_PICK_MOD_ARCHIVE = 1004;
+    private static final int REQ_PICK_MOD_FOLDER = 1005;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private final AtomicBoolean cancelExtract = new AtomicBoolean(false);
     private boolean scanning = false;
     private boolean launched = false;
+    private File activeGameRoot;
 
     private TextView titleView;
     private TextView bodyView;
@@ -241,13 +244,13 @@ public class BootActivity extends Activity {
     private void evaluateAndProceed() {
         File fastPrivate = GameLocator.findPrivateGameRoot(this);
         if (fastPrivate != null) {
-            prepareAndLaunch(fastPrivate);
+            showLauncherHub(fastPrivate);
             return;
         }
 
         File cached = GameLocator.getCachedGameRoot(this);
         if (cached != null && GameLocator.hasStoragePermission(this)) {
-            prepareAndLaunch(cached);
+            showLauncherHub(cached);
             return;
         }
 
@@ -668,10 +671,189 @@ public class BootActivity extends Activity {
             if (uri != null) {
                 startGogExtraction(null, uri, "instalador GOG");
             }
+        } else if (requestCode == REQ_PICK_MOD_ARCHIVE && resultCode == RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null && activeGameRoot != null) {
+                startModInstall(uri, false);
+            }
+        } else if (requestCode == REQ_PICK_MOD_FOLDER && resultCode == RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null && activeGameRoot != null) {
+                startModInstall(uri, true);
+            }
         }
     }
 
+    private void showLauncherHub(File gameRoot) {
+        activeGameRoot = gameRoot;
+        GameLocator.saveGameRoot(this, gameRoot);
+        OverlayInstaller.ensureInstalled(this);
+
+        boolean pt = isPt();
+        java.util.List<ModManager.ModInfo> mods = ModManager.listMods(gameRoot);
+        ModManager.ModInfo selected = ModManager.findSelectedMod(this, gameRoot);
+
+        titleView.setText("OpenDE - Deus Ex");
+        String profileLabel = selected != null
+            ? selected.name + (selected.version.isEmpty() ? "" : " (" + selected.version + ")")
+            : (pt ? "Deus Ex (Original / Vanilla)" : "Deus Ex (Original / Vanilla)");
+        String modsCountText = mods.isEmpty()
+            ? (pt ? "Nenhum mod instalado." : "No mods installed.")
+            : (pt ? mods.size() + " mod(s) instalado(s)." : mods.size() + " mod(s) installed.");
+        String isolationNote = selected != null
+            ? (pt ? "Saves e configs isolados em mods/" + selected.id : "Isolated saves & configs in mods/" + selected.id)
+            : (pt ? "Pasta base: " + gameRoot.getAbsolutePath() : "Base folder: " + gameRoot.getAbsolutePath());
+
+        bodyView.setText((pt ? "Perfil ativo: " : "Active profile: ") + profileLabel + "\n" + modsCountText + "\n" + isolationNote);
+        qrView.setVisibility(View.GONE);
+        segmentedBar.setIndeterminateMode(false);
+        segmentedBar.setProgressPermille(1000);
+
+        primaryBtn.setVisibility(View.VISIBLE);
+        primaryBtn.setEnabled(true);
+        primaryBtn.setText(selected != null
+            ? (pt ? "Jogar Mod: " + selected.name : "Play Mod: " + selected.name)
+            : (pt ? "Jogar Deus Ex" : "Play Deus Ex"));
+        primaryBtn.setOnClickListener(v -> prepareAndLaunch(gameRoot, selected != null ? selected.id : ""));
+
+        steamBtn.setVisibility(View.VISIBLE);
+        steamBtn.setEnabled(true);
+        steamBtn.setText(pt ? "Selecionar Mod" : "Select Mod");
+        steamBtn.setOnClickListener(v -> showModSelectorDialog(gameRoot));
+
+        secondaryBtn.setVisibility(View.VISIBLE);
+        secondaryBtn.setEnabled(true);
+        secondaryBtn.setText(pt ? "Instalar Mod" : "Install Mod");
+        secondaryBtn.setOnClickListener(v -> openModArchivePicker());
+
+        tertiaryBtn.setVisibility(View.VISIBLE);
+        tertiaryBtn.setEnabled(true);
+        tertiaryBtn.setText(pt ? "Pasta de Mod" : "Mod Folder");
+        tertiaryBtn.setOnClickListener(v -> openModFolderPicker());
+    }
+
+    private void showModSelectorDialog(File gameRoot) {
+        boolean pt = isPt();
+        java.util.List<ModManager.ModInfo> mods = ModManager.listMods(gameRoot);
+        String currentId = ModManager.getSelectedModId(this);
+
+        String[] labels = new String[mods.size() + 1];
+        labels[0] = "Deus Ex (Original / Vanilla)";
+        int checked = 0;
+        for (int i = 0; i < mods.size(); i++) {
+            ModManager.ModInfo mod = mods.get(i);
+            labels[i + 1] = mod.name + (mod.hasCustomScripts ? " [Total/Script]" : "");
+            if (mod.id.equals(currentId)) {
+                checked = i + 1;
+            }
+        }
+
+        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+            .setTitle(pt ? "Selecionar Perfil / Mod" : "Select Profile / Mod")
+            .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                String newId = which == 0 ? "" : mods.get(which - 1).id;
+                ModManager.setSelectedModId(this, newId);
+                dialog.dismiss();
+                showLauncherHub(gameRoot);
+            })
+            .setNegativeButton(pt ? "Fechar" : "Close", null);
+
+        if (!mods.isEmpty()) {
+            builder.setNeutralButton(pt ? "Remover Mod..." : "Delete Mod...", (d, w) -> showDeleteModDialog(gameRoot, mods));
+        }
+        builder.show();
+    }
+
+    private void showDeleteModDialog(File gameRoot, java.util.List<ModManager.ModInfo> mods) {
+        boolean pt = isPt();
+        String[] names = new String[mods.size()];
+        for (int i = 0; i < mods.size(); i++) {
+            names[i] = mods.get(i).name + " (" + mods.get(i).id + ")";
+        }
+        new AlertDialog.Builder(this)
+            .setTitle(pt ? "Remover qual mod?" : "Delete which mod?")
+            .setItems(names, (dialog, which) -> {
+                ModManager.ModInfo target = mods.get(which);
+                ModManager.deleteMod(this, gameRoot, target);
+                showLauncherHub(gameRoot);
+            })
+            .setNegativeButton(pt ? "Cancelar" : "Cancel", null)
+            .show();
+    }
+
+    private void openModArchivePicker() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            startActivityForResult(intent, REQ_PICK_MOD_ARCHIVE);
+        } catch (Exception e) {
+            boolean pt = isPt();
+            bodyView.setText(pt ? "Não foi possível abrir o seletor de arquivos." : "Could not open file picker.");
+        }
+    }
+
+    private void openModFolderPicker() {
+        try {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+            intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivityForResult(intent, REQ_PICK_MOD_FOLDER);
+        } catch (Exception e) {
+            boolean pt = isPt();
+            bodyView.setText(pt ? "Não foi possível abrir o seletor de pastas." : "Could not open folder picker.");
+        }
+    }
+
+    private void startModInstall(Uri uri, boolean isFolder) {
+        boolean pt = isPt();
+        scanning = true;
+        cancelExtract.set(false);
+        titleView.setText(pt ? "Instalando Mod..." : "Installing Mod...");
+        bodyView.setText(pt ? "Preparando arquivos..." : "Preparing files...");
+        segmentedBar.setIndeterminateMode(false);
+        segmentedBar.setProgressPermille(50);
+        primaryBtn.setVisibility(View.VISIBLE);
+        primaryBtn.setEnabled(true);
+        primaryBtn.setText(pt ? "Cancelar" : "Cancel");
+        primaryBtn.setOnClickListener(v -> cancelExtract.set(true));
+        steamBtn.setVisibility(View.GONE);
+        secondaryBtn.setVisibility(View.GONE);
+        tertiaryBtn.setVisibility(View.GONE);
+
+        executor.execute(() -> {
+            try {
+                ModManager.ModInfo installed = isFolder
+                    ? ModInstaller.installFolder(this, activeGameRoot, uri, cancelExtract,
+                        (msg, permille) -> runOnUiThread(() -> {
+                            bodyView.setText(msg);
+                            segmentedBar.setProgressPermille(permille);
+                        }))
+                    : ModInstaller.installArchive(this, activeGameRoot, uri, cancelExtract,
+                        (msg, permille) -> runOnUiThread(() -> {
+                            bodyView.setText(msg);
+                            segmentedBar.setProgressPermille(permille);
+                        }));
+                ModManager.setSelectedModId(this, installed.id);
+                runOnUiThread(() -> {
+                    scanning = false;
+                    showLauncherHub(activeGameRoot);
+                });
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    scanning = false;
+                    showLauncherHub(activeGameRoot);
+                    bodyView.setText((pt ? "Erro ao instalar mod: " : "Mod install failed: ") + e.getMessage());
+                });
+            }
+        });
+    }
+
     private void prepareAndLaunch(File gameRoot) {
+        String selectedId = ModManager.getSelectedModId(this);
+        prepareAndLaunch(gameRoot, selectedId);
+    }
+
+    private void prepareAndLaunch(File gameRoot, String modId) {
         if (launched) {
             return;
         }
@@ -679,6 +861,9 @@ public class BootActivity extends Activity {
         GameLocator.saveGameRoot(this, gameRoot);
         OverlayInstaller.ensureInstalled(this);
         Intent intent = new Intent(this, OpenDEActivity.class);
+        if (modId != null && !modId.isEmpty()) {
+            intent.putExtra(OpenDEActivity.EXTRA_MOD_ID, modId);
+        }
         intent.addFlags(Intent.FLAG_ACTIVITY_NO_ANIMATION);
         startActivity(intent);
         overridePendingTransition(0, 0);

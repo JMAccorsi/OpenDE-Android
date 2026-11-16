@@ -65,7 +65,9 @@ namespace dx {
         slots.clear();
         cells.clear();
         alwaysSlots.clear();
+        staleScratch.clear();
         nextOrder = 0;
+        syncedStaticCount = 0;
     }
 
     void CollisionHash::insert(uint32_t slot)
@@ -196,10 +198,12 @@ namespace dx {
         slots.erase(it);
     }
 
-    void CollisionHash::sync(const std::vector<UObject*>& actors)
+    void CollisionHash::sync(const std::vector<UObject*>& actors, size_t firstDynamic)
     {
         syncStamp++;
-        for (size_t i = 0; i < actors.size(); i++) {
+        const bool skipStatic = firstDynamic > 0 && syncedStaticCount == firstDynamic && firstDynamic <= actors.size();
+        const size_t start = skipStatic ? firstDynamic : 0;
+        for (size_t i = start; i < actors.size(); i++) {
             UObject* actor = actors[i];
             if (!actor) {
                 continue;
@@ -211,13 +215,16 @@ namespace dx {
                 entries[it->second].seen = syncStamp;
             }
         }
-        std::vector<UObject*> stale;
+        if (!skipStatic && firstDynamic > 0 && firstDynamic <= actors.size()) {
+            syncedStaticCount = firstDynamic;
+        }
+        staleScratch.clear();
         for (const Entry& entry : entries) {
-            if (entry.live && entry.seen != syncStamp) {
-                stale.push_back(entry.actor);
+            if (entry.live && entry.seen != syncStamp && (!skipStatic || entry.order >= firstDynamic)) {
+                staleScratch.push_back(entry.actor);
             }
         }
-        for (UObject* actor : stale) {
+        for (UObject* actor : staleScratch) {
             remove(actor);
         }
         nextOrder = actors.size();

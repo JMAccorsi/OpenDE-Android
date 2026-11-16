@@ -9,8 +9,8 @@ android {
         applicationId "com.opende.deusex"
         minSdkVersion 26
         targetSdkVersion 34
-        versionCode 1
-        versionName "1.0"
+        versionCode 2
+        versionName "0.2-beta"
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_STL=c++_shared", "-DSKIP_UT=ON", "-DSKIP_QA=ON", "-DCMAKE_BUILD_TYPE=Release"
@@ -59,4 +59,6 @@ dependencies {
     implementation 'in.dragonbra:javasteam-depotdownloader:1.8.0'
     implementation 'org.bouncycastle:bcprov-jdk15to18:1.78.1'
     implementation 'com.google.zxing:core:3.5.3'
+    implementation 'org.apache.commons:commons-compress:1.26.2'
+    implementation 'org.tukaani:xz:1.9'
 }

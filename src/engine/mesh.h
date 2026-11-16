@@ -81,6 +81,7 @@ namespace dx {
 
     class UMesh : public UPrimitive {
     public:
+        UMesh() { typeBits |= OBJ_Mesh; }
         void serialize(Reader& reader, Linker& source) override;
 
         const AnimSequence* findSequence(Name sequence) const;
@@ -114,6 +115,7 @@ namespace dx {
 
     class ULodMesh : public UMesh {
     public:
+        ULodMesh() { typeBits |= OBJ_LodMesh; }
         void serialize(Reader& reader, Linker& source) override;
         std::vector<MeshTriangle> triangles() const override;
         void lodTriangles(int32_t vertexSubset, bool morph, int32_t nonMorph, const std::vector<float>& alphas, std::vector<MeshTriangle>& result) const;
@@ -157,4 +159,28 @@ namespace dx {
     };
 
     void registerMeshResources();
+
+    template <>
+    inline UMesh* cast<UMesh>(UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Mesh)) ? static_cast<UMesh*>(object) : nullptr;
+    }
+
+    template <>
+    inline const UMesh* cast<UMesh>(const UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Mesh)) ? static_cast<const UMesh*>(object) : nullptr;
+    }
+
+    template <>
+    inline ULodMesh* cast<ULodMesh>(UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_LodMesh)) ? static_cast<ULodMesh*>(object) : nullptr;
+    }
+
+    template <>
+    inline const ULodMesh* cast<ULodMesh>(const UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_LodMesh)) ? static_cast<const ULodMesh*>(object) : nullptr;
+    }
 }

@@ -25,6 +25,7 @@ namespace dx {
 
     class UTexture : public UObject {
     public:
+        UTexture() { typeBits |= OBJ_Texture; }
         void serialize(Reader& reader, Linker& source) override;
 
         uint8_t format() const;
@@ -222,4 +223,16 @@ namespace dx {
     };
 
     void registerEngineResources();
+
+    template <>
+    inline UTexture* cast<UTexture>(UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Texture)) ? static_cast<UTexture*>(object) : nullptr;
+    }
+
+    template <>
+    inline const UTexture* cast<UTexture>(const UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Texture)) ? static_cast<const UTexture*>(object) : nullptr;
+    }
 }

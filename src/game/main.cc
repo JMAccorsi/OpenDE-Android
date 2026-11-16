@@ -23,12 +23,16 @@
 #include <emscripten.h>
 #include <emscripten/html5.h>
 #endif
+#ifdef __ANDROID__
+#include <sys/stat.h>
+#endif
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <exception>
 #include <filesystem>
 #include <memory>
@@ -165,6 +169,9 @@ namespace {
     struct Options {
         std::string map;
         std::string screenshot;
+        std::string ini;
+        std::string userIni;
+        std::string mod;
         int frames = -1;
         int width = 1280;
         int height = 720;
@@ -188,6 +195,12 @@ namespace {
             } else if (arg == "--height" && i + 1 < argc) {
                 options.height = std::atoi(argv[++i]);
                 options.sizeGiven = true;
+            } else if (arg == "--ini" && i + 1 < argc) {
+                options.ini = argv[++i];
+            } else if (arg == "--userini" && i + 1 < argc) {
+                options.userIni = argv[++i];
+            } else if (arg == "--mod" && i + 1 < argc) {
+                options.mod = argv[++i];
             } else if (arg == "--exec" && i + 1 < argc) {
                 options.commands.push_back(argv[++i]);
             } else if (arg == "--at" && i + 1 < argc) {
@@ -311,9 +324,12 @@ namespace {
             return std::atan(std::tan(adjusted * dx::Pi / 360.0f) * aspect) * 360.0f / dx::Pi;
         }
 
-        void loadDeusExClasses()
+        void loadPackageClasses(const std::string& package)
         {
-            dx::Linker* linker = dx::objects::loadPackage(dx::Name("DeusEx"));
+            dx::Linker* linker = dx::objects::loadPackage(dx::Name(package));
+            if (!linker) {
+                return;
+            }
             const dx::Package& file = linker->file();
             for (size_t i = 0; i < file.exports().size(); i++) {
                 if (file.exports()[i].classRef == 0) {
@@ -612,13 +628,23 @@ namespace {
             }
 
             syncExtraMenusLocalization();
-            dx::UObject* settings = dx::objects::findClass("DeusEx.MenuSettings")->defaultObject;
             if (hasDxControllerMenu) {
+                dx::UObject* settings = dx::objects::findClass("DeusEx.MenuSettings")->defaultObject;
                 dx::deusex::configureControllerSettingsMenu(settings, gameplay, screen);
             } else {
                 const bool pt = dx::iequals(dx::config::language(), "ptb");
-                dx::deusex::insertMenuButton(settings, 3, dx::deusex::utf8ToCp1252(pt ? "Jogabilidade Extra" : "Extra Gameplay"), gameplay);
-                dx::deusex::insertMenuButton(settings, 5, dx::deusex::utf8ToCp1252(pt ? "Gráficos Extras" : "Extra Graphics"), screen);
+                dx::UClass* settingsClass = dx::objects::findClass("DeusEx.MenuSettings");
+                std::vector<dx::UClass*> menus;
+                for (dx::UObject* object : dx::objects::all()) {
+                    dx::UClass* cls = dx::cast<dx::UClass>(object);
+                    if (cls && cls->defaultObject && cls->isChildOf(settingsClass)) {
+                        menus.push_back(cls);
+                    }
+                }
+                for (dx::UClass* menu : menus) {
+                    dx::deusex::insertMenuButton(menu->defaultObject, 3, dx::deusex::utf8ToCp1252(pt ? "Jogabilidade Extra" : "Extra Gameplay"), gameplay);
+                    dx::deusex::insertMenuButton(menu->defaultObject, 5, dx::deusex::utf8ToCp1252(pt ? "Gráficos Extras" : "Extra Graphics"), screen);
+                }
             }
         }
 
@@ -736,7 +762,16 @@ namespace {
 
         bool start()
         {
-            dx::engine::initialize(dx::config::findGameRoot(DEUSEX_GAME_DATA).string());
+            std::filesystem::path root = dx::config::findGameRoot(DEUSEX_GAME_DATA);
+            if (!options.mod.empty()) {
+                std::filesystem::path mod = (root / "..").lexically_normal() / "mods" / options.mod;
+                if (!std::filesystem::is_directory(mod)) {
+                    std::fprintf(stderr, "mod %s not found in %s\n", options.mod.c_str(), mod.parent_path().string().c_str());
+                    return false;
+                }
+                dx::config::useMod(mod);
+            }
+            dx::engine::initialize(root.string(), options.ini, options.userIni);
             dx::audio::initialize();
             dx::audio::setLightRandom(dx::lightRandomBase);
             renderer = std::make_unique<dx::SceneRenderer>();
@@ -791,7 +826,10 @@ namespace {
             dx::CanvasHooks& hooks = dx::canvasHooks();
             hooks.target = &renderer->canvas();
             hooks.drawActor = [this](dx::UObject* actor, bool) {
-                renderer->drawActorOverlay(actor, viewLocation, viewRotation, viewFov, true);
+                // Keep first-person viewmodels at a natural FOV so wide or narrow
+                // world FOV settings never shrink the weapon or clip it into the camera.
+                float vmFov = std::clamp(viewFov, 85.0f, 95.0f);
+                renderer->drawActorOverlay(actor, viewLocation, viewRotation, vmFov, true);
             };
             hooks.clipboardCopy = [](const std::string& text) {
                 SDL_SetClipboardText(text.c_str());
@@ -822,7 +860,9 @@ namespace {
                 int height = static_cast<int>(std::lround(request.height));
                 renderer->drawSceneRect(world->level, world->actors, request.location, request.rotation, request.fov, hidden, x, y, width, height);
             });
-            loadDeusExClasses();
+            loadPackageClasses("DeusEx");
+            std::string rootClass = dx::config::system().get("Engine.Engine", "Root").value_or("DeusEx.DeusExRootWindow");
+            loadPackageClasses(rootClass.substr(0, rootClass.find('.')));
             dx::deusex::registerUiTextTranslator();
             addFieldOfViewChoice();
             addExtraOptions();
@@ -1583,6 +1623,29 @@ namespace {
                 }
             } else if (verb == "shot") {
                 pendingShot = rest;
+            } else if (verb == "bench") {
+                int warm = 300;
+                int count = 900;
+                char label[64] = {};
+                std::sscanf(rest.c_str(), "%d %d %63s", &warm, &count, label);
+                benchWarmup = std::max(warm, 0);
+                benchFrames = std::max(count, 1);
+                benchLabel = label[0] ? label : "run";
+                benchSamples.clear();
+                benchSamples.reserve(static_cast<size_t>(benchFrames));
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "OpenDE_Bench: start label=%s warmup=%d frames=%d", benchLabel.c_str(), benchWarmup, benchFrames);
+            } else if (verb == "opt") {
+                char key[32] = {};
+                int value = 1;
+                std::sscanf(rest.c_str(), "%31s %d", key, &value);
+                if (std::strcmp(key, "noop") == 0) {
+                    dx::vm::skipNoopCalls = value != 0;
+                }
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "OpenDE_Bench: opt %s=%d", key, value);
+            } else if (verb == "profdetail") {
+                if (world) {
+                    world->profDetail = rest == "1";
+                }
             } else if (verb == "state") {
                 dx::UObject* player = world ? world->player() : nullptr;
                 if (player) {
@@ -1602,7 +1665,18 @@ namespace {
             if (!extPath || !*extPath) {
                 return;
             }
-            std::string cmdPath = std::string(extPath) + "/debug_cmd.txt";
+            std::string cmdPath = "/storage/emulated/0/OpenDE/debug_cmd.txt";
+            struct stat cmdStat {};
+            if (::stat(cmdPath.c_str(), &cmdStat) != 0) {
+                cmdPath = std::string(extPath) + "/debug_cmd.txt";
+                if (::stat(cmdPath.c_str(), &cmdStat) != 0) {
+                    return;
+                }
+            }
+            const long long cmdStamp = static_cast<long long>(cmdStat.st_mtim.tv_sec) * 1000000000LL + static_cast<long long>(cmdStat.st_mtim.tv_nsec) + static_cast<long long>(cmdStat.st_size);
+            if (cmdStamp == lastDebugCmdStamp) {
+                return;
+            }
             std::FILE* f = std::fopen(cmdPath.c_str(), "rb");
             if (!f) {
                 return;
@@ -1613,7 +1687,9 @@ namespace {
                 contents.append(buf, n);
             }
             std::fclose(f);
-            std::remove(cmdPath.c_str());
+            if (std::remove(cmdPath.c_str()) != 0) {
+                lastDebugCmdStamp = cmdStamp;
+            }
 
             std::string lastExecOut;
             std::size_t start = 0;
@@ -1650,9 +1726,12 @@ namespace {
             std::snprintf(
                 jsonBuf,
                 sizeof(jsonBuf),
-                "{\"frame\":%d,\"fps\":%.1f,\"res\":[%d,%d],\"wantsMouse\":%s,\"touchEditor\":%s,\"lang\":\"%s\",\"hasPlayer\":%s,\"pos\":[%.1f,%.1f,%.1f],\"yaw\":%d,\"health\":%d,\"playerState\":\"%s\",\"execOut\":\"%s\"}\n",
+                "{\"frame\":%d,\"fps\":%.1f,\"tickMs\":%.2f,\"renderMs\":%.2f,\"swapMs\":%.2f,\"res\":[%d,%d],\"wantsMouse\":%s,\"touchEditor\":%s,\"lang\":\"%s\",\"hasPlayer\":%s,\"pos\":[%.1f,%.1f,%.1f],\"yaw\":%d,\"health\":%d,\"playerState\":\"%s\",\"execOut\":\"%s\"}\n",
                 frame,
                 static_cast<double>(fps),
+                static_cast<double>(profTickMs),
+                static_cast<double>(profRenderMs),
+                static_cast<double>(profSwapMs),
                 frameWidth,
                 frameHeight,
                 dx::extension::wantsMouse() ? "true" : "false",
@@ -1692,6 +1771,88 @@ namespace {
                 step();
             }
             return 0;
+        }
+
+        void recordBench(double perfFreqMs, uint64_t tTick0, uint64_t tTick1, uint64_t tRender0, uint64_t tRender1, uint64_t tSwap0, uint64_t tSwap1)
+        {
+            uint64_t prevSwap = benchLastSwap;
+            benchLastSwap = tSwap1;
+            if (benchWarmup < 0 || prevSwap == 0) {
+                return;
+            }
+            if (!world || !world->player() || !pendingMap.empty()) {
+                return;
+            }
+            if (benchWarmup > 0) {
+                benchWarmup--;
+                return;
+            }
+            auto ms = [perfFreqMs](uint64_t a, uint64_t b) { return static_cast<float>(static_cast<double>(b - a) / perfFreqMs); };
+            const auto& st = renderer->stats();
+            BenchSample s {};
+            s.frame = ms(prevSwap, tSwap1);
+            s.tick = ms(tTick0, tTick1);
+            s.render = ms(tRender0, tRender1);
+            s.swap = ms(tSwap0, tSwap1);
+            s.sync = world->profSyncMs;
+            s.actor = world->profActorMs;
+            s.ai = world->profAiMs;
+            s.lgt = st.lightsMs;
+            s.occ = st.occludeMs;
+            s.sky = st.skyMs;
+            s.bsp = st.bspMs;
+            s.act = st.actorsMs;
+            s.actC = st.actCandMs;
+            s.actE = st.actEmitMs;
+            s.actF = st.actFlushMs;
+            s.ticked = world->profTickedCount;
+            s.vmCalls = world->profTickVmCount;
+            s.actN = st.actActors;
+            s.actB = st.actBatches;
+            benchSamples.push_back(s);
+            if (static_cast<int>(benchSamples.size()) < benchFrames) {
+                return;
+            }
+            benchWarmup = -1;
+            const size_t n = benchSamples.size();
+            std::vector<float> frames;
+            frames.reserve(n);
+            BenchSample sum {};
+            double ticked = 0, vmCalls = 0, actN = 0, actB = 0;
+            for (const BenchSample& b : benchSamples) {
+                frames.push_back(b.frame);
+                sum.frame += b.frame; sum.tick += b.tick; sum.render += b.render; sum.swap += b.swap;
+                sum.sync += b.sync; sum.actor += b.actor; sum.ai += b.ai;
+                sum.lgt += b.lgt; sum.occ += b.occ; sum.sky += b.sky; sum.bsp += b.bsp;
+                sum.act += b.act; sum.actC += b.actC; sum.actE += b.actE; sum.actF += b.actF;
+                ticked += b.ticked; vmCalls += b.vmCalls; actN += b.actN; actB += b.actB;
+            }
+            std::sort(frames.begin(), frames.end());
+            auto pct = [&frames, n](double p) { return static_cast<double>(frames[std::min(n - 1, static_cast<size_t>(p * static_cast<double>(n - 1) + 0.5))]); };
+            const double inv = 1.0 / static_cast<double>(n);
+            const double mean = static_cast<double>(sum.frame) * inv;
+            char line[1024];
+            std::snprintf(line, sizeof(line),
+                "label=%s n=%zu fps=%.2f frame[mean=%.2f p50=%.2f p95=%.2f p99=%.2f max=%.2f] tick=%.2f[sync=%.2f actor=%.2f ai=%.2f ticked=%.0f vm=%.0f] render=%.2f[lgt=%.2f occ=%.2f sky=%.2f bsp=%.2f act=%.2f c=%.2f e=%.2f f=%.2f actors=%.1f batches=%.1f] swap=%.2f",
+                benchLabel.c_str(), n, 1000.0 / mean, mean, pct(0.50), pct(0.95), pct(0.99), static_cast<double>(frames.back()),
+                static_cast<double>(sum.tick) * inv, static_cast<double>(sum.sync) * inv, static_cast<double>(sum.actor) * inv, static_cast<double>(sum.ai) * inv, ticked * inv, vmCalls * inv,
+                static_cast<double>(sum.render) * inv, static_cast<double>(sum.lgt) * inv, static_cast<double>(sum.occ) * inv, static_cast<double>(sum.sky) * inv, static_cast<double>(sum.bsp) * inv,
+                static_cast<double>(sum.act) * inv, static_cast<double>(sum.actC) * inv, static_cast<double>(sum.actE) * inv, static_cast<double>(sum.actF) * inv, actN * inv, actB * inv,
+                static_cast<double>(sum.swap) * inv);
+            SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "OpenDE_Bench: %s", line);
+#ifdef __ANDROID__
+            if (std::FILE* out = std::fopen("/storage/emulated/0/OpenDE/bench_results.txt", "ab")) {
+                std::fprintf(out, "%s\n", line);
+                std::fclose(out);
+            } else if (const char* extPath = SDL_AndroidGetExternalStoragePath()) {
+                std::string outPath = std::string(extPath) + "/bench_results.txt";
+                if (std::FILE* out2 = std::fopen(outPath.c_str(), "ab")) {
+                    std::fprintf(out2, "%s\n", line);
+                    std::fclose(out2);
+                }
+            }
+#endif
+            benchSamples.clear();
         }
 
         void step()
@@ -1734,6 +1895,8 @@ namespace {
             viewportTime += static_cast<double>(delta);
             applyPlayerSpeed();
             applyRenderOptions();
+            const double perfFreqMs = static_cast<double>(SDL_GetPerformanceFrequency()) / 1000.0;
+            uint64_t tTick0 = SDL_GetPerformanceCounter();
             if (world && !touchOverlay.isEditorOpen()) {
                 world->tick(delta);
             }
@@ -1747,11 +1910,14 @@ namespace {
                 dx::console::ConsoleLines(console) = static_cast<int32_t>(std::min(dx::console::ConsolePos(console) * static_cast<float>(height), static_cast<float>(height)));
             }
             handleTravel();
+            uint64_t tTick1 = SDL_GetPerformanceCounter();
             int width = 0;
             int height = 0;
             SDL_GL_GetDrawableSize(window, &width, &height);
+            uint64_t tRender0 = SDL_GetPerformanceCounter();
             render(width, height);
             renderer->applyBrightness(static_cast<float>(std::atof(dx::config::system().get(videoSection(), "Brightness").value_or("0.5").c_str())));
+            uint64_t tRender1 = SDL_GetPerformanceCounter();
             dx::audio::update(viewLocation, viewRotation, delta);
             if (!pendingShot.empty()) {
                 std::vector<uint8_t> pixels;
@@ -1780,7 +1946,57 @@ namespace {
                 }
                 running = false;
             }
+            uint64_t tSwap0 = SDL_GetPerformanceCounter();
             SDL_GL_SwapWindow(window);
+            uint64_t tSwap1 = SDL_GetPerformanceCounter();
+            auto ema = [](float prev, float sample) { return prev <= 0.001f ? sample : (prev * 0.9f + sample * 0.1f); };
+            profTickMs = ema(profTickMs, static_cast<float>(static_cast<double>(tTick1 - tTick0) / perfFreqMs));
+            profRenderMs = ema(profRenderMs, static_cast<float>(static_cast<double>(tRender1 - tRender0) / perfFreqMs));
+            profSwapMs = ema(profSwapMs, static_cast<float>(static_cast<double>(tSwap1 - tSwap0) / perfFreqMs));
+            recordBench(perfFreqMs, tTick0, tTick1, tRender0, tRender1, tSwap0, tSwap1);
+#ifdef __ANDROID__
+            if ((frame % 120) == 0) {
+                float fps = delta > 0.0001f ? (1.0f / delta) : 0.0f;
+                const auto& st = renderer->stats();
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "OpenDE_Perf: frame=%d fps=%.1f tick=%.2f[s=%.2f a=%.2f ai=%.2f n=%d] render=%.2f (lgt=%.2f occ=%.2f sky=%.2f bsp=%.2f act=%.2f[c=%.2f e=%.2f f=%.2f n=%d b=%d] cor=%.2f) swap=%.2f res=%dx%d",
+                    frame, static_cast<double>(fps),
+                    static_cast<double>(profTickMs),
+                    static_cast<double>(world ? world->profSyncMs : 0.0f),
+                    static_cast<double>(world ? world->profActorMs : 0.0f),
+                    static_cast<double>(world ? world->profAiMs : 0.0f),
+                    world ? world->profTickedCount : 0,
+                    static_cast<double>(profRenderMs),
+                    static_cast<double>(st.lightsMs), static_cast<double>(st.occludeMs),
+                    static_cast<double>(st.skyMs), static_cast<double>(st.bspMs),
+                    static_cast<double>(st.actorsMs),
+                    static_cast<double>(st.actCandMs), static_cast<double>(st.actEmitMs), static_cast<double>(st.actFlushMs),
+                    st.actActors, st.actBatches,
+                    static_cast<double>(st.coronasMs),
+                    static_cast<double>(profSwapMs), width, height);
+                if (world && world->profDetail) {
+                    SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                        "OpenDE_Tick: pVm=%.2f aVm=%.2f cnt=%d top=%s(%.2f) phys=%.2f",
+                        static_cast<double>(world->profTickPlayerVmMs),
+                        static_cast<double>(world->profTickActorVmMs),
+                        world->profTickVmCount,
+                        world->profTickTopClass ? world->profTickTopClass : "",
+                        static_cast<double>(world->profTickTopMs),
+                        static_cast<double>(world->profTickPhysMs));
+                    if (!world->profClassStats.empty()) {
+                        std::vector<std::pair<dx::UClass*, std::pair<float, int>>> ranked(world->profClassStats.begin(), world->profClassStats.end());
+                        std::sort(ranked.begin(), ranked.end(), [](const auto& a, const auto& b) { return a.second.first > b.second.first; });
+                        std::string summary;
+                        for (size_t i = 0; i < std::min<size_t>(5, ranked.size()); i++) {
+                            char buf[96];
+                            std::snprintf(buf, sizeof(buf), "%s(%.2f/%d) ", ranked[i].first->name.c_str(), static_cast<double>(ranked[i].second.first), ranked[i].second.second);
+                            summary += buf;
+                        }
+                        SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "OpenDE_TickTop: %s", summary.c_str());
+                    }
+                }
+            }
+#endif
             limitFrameRate();
         }
 
@@ -1795,6 +2011,16 @@ namespace {
         std::unique_ptr<dx::SceneRenderer> renderer;
         std::unique_ptr<dx::World> world;
         dx::UObject* canvasObject = nullptr;
+        struct BenchSample {
+            float frame, tick, render, swap, sync, actor, ai, lgt, occ, sky, bsp, act, actC, actE, actF;
+            int ticked, vmCalls, actN, actB;
+        };
+        int benchWarmup = -1;
+        long long lastDebugCmdStamp = 0;
+        uint64_t benchLastSwap = 0;
+        int benchFrames = 0;
+        std::string benchLabel;
+        std::vector<BenchSample> benchSamples;
         std::string pendingMap;
         int32_t pendingTravelType = dx::TRAVEL_Partial;
         std::string pendingShot;
@@ -1828,6 +2054,9 @@ namespace {
         float appliedPlayerSpeed = 1.0f;
         int appliedVSync = -1;
         uint64_t frameDeadline = 0;
+        float profTickMs = 0.0f;
+        float profRenderMs = 0.0f;
+        float profSwapMs = 0.0f;
         std::unordered_map<dx::UClass*, std::pair<float, float>> basePlayerSpeeds;
     };
 }

@@ -71,6 +71,7 @@ namespace dx {
         void resetRunaway();
         void fatal(const std::string& message);
         uint32_t assertionFailures();
+        inline bool skipNoopCalls = true;
 
         template <typename T>
         T get(Frame& stack)
@@ -153,9 +154,12 @@ namespace dx {
         private:
             UProperty* nextParam();
 
+            static constexpr size_t InlineBufferSize = 128;
             UObject* object = nullptr;
             UFunction* function = nullptr;
-            std::vector<uint8_t> buffer;
+            uint8_t* bufferPtr = nullptr;
+            alignas(16) uint8_t inlineBuffer[InlineBufferSize] {};
+            std::vector<uint8_t> heapBuffer;
             size_t argument = 0;
         };
 

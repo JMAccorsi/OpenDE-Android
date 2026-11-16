@@ -993,8 +993,15 @@ namespace dx {
                 return;
             }
 
-            std::unique_ptr<uint8_t[]> locals(new uint8_t[function->size + 16]);
-            function->initValue(locals.get());
+            alignas(16) uint8_t inlineLocals[256];
+            std::unique_ptr<uint8_t[]> heapLocals;
+            const size_t needed = function->size + 16;
+            uint8_t* localsPtr = inlineLocals;
+            if (needed > sizeof(inlineLocals)) {
+                heapLocals.reset(new uint8_t[needed]);
+                localsPtr = heapLocals.get();
+            }
+            function->initValue(localsPtr);
 
             struct OutParm {
                 uint8_t* address;
@@ -1007,7 +1014,7 @@ namespace dx {
                 if (*stack.code == EX_EndFunctionParms) {
                     break;
                 }
-                uint8_t* slot = locals.get() + param->offset;
+                uint8_t* slot = localsPtr + param->offset;
                 stack.nullContext = nullptr;
                 const bool copyArray = param->arrayDim > 1;
                 if (param->propertyFlags & CPF_OutParm) {
@@ -1037,7 +1044,7 @@ namespace dx {
                 frame.object = context;
                 frame.node = function;
                 frame.code = function->script.data();
-                frame.locals = locals.get();
+                frame.locals = localsPtr;
                 frame.previous = &stack;
                 if (singular) {
                     context->singular = true;
@@ -1050,7 +1057,7 @@ namespace dx {
                     if (singular) {
                         context->singular = false;
                     }
-                    function->destroyValue(locals.get());
+                    function->destroyValue(localsPtr);
                     throw;
                 }
                 registry.depth--;
@@ -1060,25 +1067,33 @@ namespace dx {
             }
 
             for (size_t i = outCount; i > 0; i--) {
-                outs[i - 1].property->copyAll(outs[i - 1].address, locals.get() + outs[i - 1].property->offset);
+                outs[i - 1].property->copyAll(outs[i - 1].address, localsPtr + outs[i - 1].property->offset);
             }
             if (result && function->returnParm) {
-                function->returnParm->copyAll(static_cast<uint8_t*>(result), locals.get() + function->returnParm->offset);
+                function->returnParm->copyAll(static_cast<uint8_t*>(result), localsPtr + function->returnParm->offset);
             }
-            function->destroyValue(locals.get());
+            function->destroyValue(localsPtr);
         }
 
         int32_t probeIndex(Name eventName)
         {
-            static std::unordered_map<Name, int32_t> lookup = [] {
-                std::unordered_map<Name, int32_t> table;
+            static const std::vector<int8_t> lookup = [] {
+                uint32_t maxIdx = 0;
+                Name names[64];
                 for (int32_t i = 0; i < 64; i++) {
-                    table[Name(probeNames[i])] = i;
+                    names[i] = Name(probeNames[i]);
+                    if (names[i].index() > maxIdx) {
+                        maxIdx = names[i].index();
+                    }
+                }
+                std::vector<int8_t> table(static_cast<size_t>(maxIdx) + 1, -1);
+                for (int32_t i = 0; i < 64; i++) {
+                    table[names[i].index()] = static_cast<int8_t>(i);
                 }
                 return table;
             }();
-            auto it = lookup.find(eventName);
-            return it == lookup.end() ? -1 : it->second;
+            uint32_t idx = eventName.index();
+            return idx < lookup.size() ? static_cast<int32_t>(lookup[idx]) : -1;
         }
 
         StateFrame& stateFrame(UObject* object)
@@ -1348,15 +1363,32 @@ namespace dx {
                 return;
             }
             objects::ensureLoaded(callee);
+            if (skipNoopCalls && !(callee->functionFlags & FUNC_Native) && !callee->returnParm) {
+                const auto& sc = callee->script;
+                if (sc.empty() ||
+                    (sc.size() == 1 && (sc[0] == 0x53 || sc[0] == 0x04)) ||
+                    (sc.size() == 2 && sc[0] == 0x04 && sc[1] == EX_Nothing) ||
+                    (sc.size() == 3 && sc[0] == 0x04 && sc[1] == EX_Nothing && sc[2] == 0x53)) {
+                    function = nullptr;
+                    return;
+                }
+            }
             callee->link();
-            buffer.resize(callee->size + 16);
-            callee->initValue(buffer.data());
+            size_t needed = callee->size + 16;
+            if (needed <= InlineBufferSize) {
+                std::memset(inlineBuffer, 0, needed);
+                bufferPtr = inlineBuffer;
+            } else {
+                heapBuffer.assign(needed, 0);
+                bufferPtr = heapBuffer.data();
+            }
+            callee->initValue(bufferPtr);
         }
 
         Call::~Call()
         {
-            if (function) {
-                function->destroyValue(buffer.data());
+            if (function && bufferPtr) {
+                function->destroyValue(bufferPtr);
             }
         }
 
@@ -1378,7 +1410,7 @@ namespace dx {
             if (!function || index >= function->params.size()) {
                 return nullptr;
             }
-            return buffer.data() + function->params[index]->offset;
+            return bufferPtr + function->params[index]->offset;
         }
 
         uint8_t* Call::returnValue()
@@ -1386,13 +1418,13 @@ namespace dx {
             if (!function || !function->returnParm) {
                 return nullptr;
             }
-            return buffer.data() + function->returnParm->offset;
+            return bufferPtr + function->returnParm->offset;
         }
 
         Call& Call::obj(UObject* value)
         {
             if (UProperty* param = nextParam()) {
-                *reinterpret_cast<UObject**>(buffer.data() + param->offset) = value;
+                *reinterpret_cast<UObject**>(bufferPtr + param->offset) = value;
             }
             return *this;
         }
@@ -1400,7 +1432,7 @@ namespace dx {
         Call& Call::f(float value)
         {
             if (UProperty* param = nextParam()) {
-                *reinterpret_cast<float*>(buffer.data() + param->offset) = value;
+                *reinterpret_cast<float*>(bufferPtr + param->offset) = value;
             }
             return *this;
         }
@@ -1409,9 +1441,9 @@ namespace dx {
         {
             if (UProperty* param = nextParam()) {
                 if (param->type == PropType::Byte) {
-                    buffer[param->offset] = static_cast<uint8_t>(value);
+                    bufferPtr[param->offset] = static_cast<uint8_t>(value);
                 } else {
-                    *reinterpret_cast<int32_t*>(buffer.data() + param->offset) = value;
+                    *reinterpret_cast<int32_t*>(bufferPtr + param->offset) = value;
                 }
             }
             return *this;
@@ -1420,7 +1452,7 @@ namespace dx {
         Call& Call::b(bool value)
         {
             if (UProperty* param = nextParam()) {
-                *reinterpret_cast<uint32_t*>(buffer.data() + param->offset) = value ? 1 : 0;
+                *reinterpret_cast<uint32_t*>(bufferPtr + param->offset) = value ? 1 : 0;
             }
             return *this;
         }
@@ -1428,7 +1460,7 @@ namespace dx {
         Call& Call::byte(uint8_t value)
         {
             if (UProperty* param = nextParam()) {
-                buffer[param->offset] = value;
+                bufferPtr[param->offset] = value;
             }
             return *this;
         }
@@ -1436,7 +1468,7 @@ namespace dx {
         Call& Call::n(Name value)
         {
             if (UProperty* param = nextParam()) {
-                *reinterpret_cast<Name*>(buffer.data() + param->offset) = value;
+                *reinterpret_cast<Name*>(bufferPtr + param->offset) = value;
             }
             return *this;
         }
@@ -1444,7 +1476,7 @@ namespace dx {
         Call& Call::s(const std::string& value)
         {
             if (UProperty* param = nextParam()) {
-                *reinterpret_cast<std::string*>(buffer.data() + param->offset) = value;
+                *reinterpret_cast<std::string*>(bufferPtr + param->offset) = value;
             }
             return *this;
         }
@@ -1452,7 +1484,7 @@ namespace dx {
         Call& Call::v(const Vector& value)
         {
             if (UProperty* param = nextParam()) {
-                *reinterpret_cast<Vector*>(buffer.data() + param->offset) = value;
+                *reinterpret_cast<Vector*>(bufferPtr + param->offset) = value;
             }
             return *this;
         }
@@ -1460,7 +1492,7 @@ namespace dx {
         Call& Call::r(const Rotator& value)
         {
             if (UProperty* param = nextParam()) {
-                *reinterpret_cast<Rotator*>(buffer.data() + param->offset) = value;
+                *reinterpret_cast<Rotator*>(bufferPtr + param->offset) = value;
             }
             return *this;
         }
@@ -1479,7 +1511,7 @@ namespace dx {
             Frame stub;
             stub.object = object;
             stub.node = function;
-            stub.locals = buffer.data();
+            stub.locals = bufferPtr;
             stub.code = function->stub.data();
             if (function->functionFlags & FUNC_Native) {
                 if (!function->native) {
@@ -1497,7 +1529,7 @@ namespace dx {
             frame.object = object;
             frame.node = function;
             frame.code = function->script.data();
-            frame.locals = buffer.data();
+            frame.locals = bufferPtr;
             frame.previous = natives().frame;
             NativeRegistry& registry = natives();
             if (registry.depth > 250) {

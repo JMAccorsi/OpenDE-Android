@@ -18,7 +18,7 @@
 #include <filesystem>
 
 namespace dx::engine {
-    void initializeCore(const std::string& gameRoot)
+    void initializeCore(const std::string& gameRoot, const std::filesystem::path& systemIni, const std::filesystem::path& userIni)
     {
         static bool initialized = false;
         if (initialized) {
@@ -26,24 +26,25 @@ namespace dx::engine {
         }
         initialized = true;
         std::filesystem::path root(gameRoot);
-        config::initialize(config::resolveSubdir(root, "System"));
+        config::initialize(config::resolveSubdir(root, "System"), systemIni, userIni);
         registerEngineResources();
         registerMeshResources();
         registerObjectNatives();
         registerEngineNatives();
         extension::registerNatives();
         registerDeusExNatives();
+        registerTnmNatives();
         objects::initialize(root);
     }
 
-    void initialize(const std::string& gameRoot)
+    void initialize(const std::string& gameRoot, const std::filesystem::path& systemIni, const std::filesystem::path& userIni)
     {
         static bool initialized = false;
         if (initialized) {
             return;
         }
         initialized = true;
-        initializeCore(gameRoot);
+        initializeCore(gameRoot, systemIni, userIni);
         if (!iequals(config::language(), "int")) {
             for (const char* locPkg : { "DeusExText", "DeusExConText" }) {
                 std::filesystem::path overridePath = config::localizedPackagePath(locPkg);
@@ -56,7 +57,20 @@ namespace dx::engine {
         for (const char* package : packages) {
             objects::loadPackage(Name(package));
         }
-        Linker* dxController = objects::loadPackage(Name("DXController"));
+        bool modOverridesUiOrScripts = false;
+        if (!config::modDirectory().empty()) {
+            std::filesystem::path modSys = config::resolveSubdir(config::modDirectory(), "System");
+            std::error_code ec;
+            if (!modSys.empty() && std::filesystem::is_regular_file(config::resolveCase(modSys / "DeusEx.u"), ec)) {
+                modOverridesUiOrScripts = true;
+            }
+            if (auto rootVal = config::system().get("Engine.Engine", "Root")) {
+                if (!iequals(*rootVal, "DeusEx.DeusExRootWindow") && !iequals(*rootVal, "DXController.ControllerRootWindow")) {
+                    modOverridesUiOrScripts = true;
+                }
+            }
+        }
+        Linker* dxController = modOverridesUiOrScripts ? nullptr : objects::loadPackage(Name("DXController"));
         if (dxController) {
             config::system().set("Engine.Engine", "Console", "DXController.ControllerConsole");
             config::system().set("Engine.Engine", "Root", "DXController.ControllerRootWindow");

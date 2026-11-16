@@ -6,6 +6,7 @@
 #include "engine/decal.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -121,6 +122,18 @@ namespace dx {
         std::vector<UObject*> newlySpawned;
         size_t runtimeStart = 0;
         std::function<void(UObject*, float)> inputHook;
+        float profSyncMs = 0;
+        float profActorMs = 0;
+        float profAiMs = 0;
+        int profTickedCount = 0;
+        float profTickPlayerVmMs = 0;
+        bool profDetail = false;
+        float profTickActorVmMs = 0;
+        int profTickVmCount = 0;
+        float profTickTopMs = 0;
+        const char* profTickTopClass = "";
+        float profTickPhysMs = 0;
+        std::unordered_map<UClass*, std::pair<float, int>> profClassStats;
 
     private:
         std::shared_ptr<const std::vector<UObject*>> liveActorsCache;
@@ -129,9 +142,10 @@ namespace dx {
     };
 
     namespace engine {
-        void initialize(const std::string& gameRoot);
-        void initializeCore(const std::string& gameRoot);
+        void initialize(const std::string& gameRoot, const std::filesystem::path& systemIni = {}, const std::filesystem::path& userIni = {});
+        void initializeCore(const std::string& gameRoot, const std::filesystem::path& systemIni = {}, const std::filesystem::path& userIni = {});
         void registerEngineNatives();
         void registerDeusExNatives();
+        void registerTnmNatives();
     }
 }

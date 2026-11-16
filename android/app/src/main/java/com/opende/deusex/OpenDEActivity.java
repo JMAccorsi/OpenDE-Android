@@ -7,12 +7,23 @@ import org.libsdl.app.SDLActivity;
 import java.io.File;
 
 public class OpenDEActivity extends SDLActivity {
+    public static final String EXTRA_MOD_ID = "mod_id";
+
     @Override
     protected String[] getLibraries() {
         return new String[] {
             "SDL2",
             "main"
         };
+    }
+
+    @Override
+    protected String[] getArguments() {
+        String modId = getIntent() != null ? getIntent().getStringExtra(EXTRA_MOD_ID) : null;
+        if (modId != null && !modId.trim().isEmpty()) {
+            return new String[] { "--mod", modId.trim() };
+        }
+        return new String[0];
     }
 
     @Override

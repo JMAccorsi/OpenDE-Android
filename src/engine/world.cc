@@ -1,3 +1,4 @@
+#include "core/prof_clock.h"
 #include "engine/world.h"
 
 #include "audio/audio.h"
@@ -1043,6 +1044,11 @@ namespace dx {
         return timeSeconds - zoneRenderTime > 5.0f || actor::DistanceFromPlayer(a) > 1200.0f;
     }
 
+    static inline float tickNowMs()
+    {
+        return profNowMs();
+    }
+
     bool World::tickActor(UObject* a, float deltaSeconds)
     {
         if (!a || a->destroyed) {
@@ -1070,6 +1076,8 @@ namespace dx {
             return true;
         }
 
+        const bool detail = profDetail;
+        float t2 = detail ? tickNowMs() : 0.0f;
         bool isPlayer = playerPawnOf(a) != nullptr;
         if (!isPlayer) {
             if (levelinfo::bPlayersOnly(levelInfo)) {
@@ -1078,7 +1086,21 @@ namespace dx {
             static const Name nameTick("Tick");
             vm::Call tick(a, nameTick);
             if (tick.valid()) {
+                profTickVmCount++;
                 tick.f(deltaSeconds).run();
+            }
+            if (detail) {
+                float dt = tickNowMs() - t2;
+                profTickActorVmMs += dt;
+                if (dt > profTickTopMs && a->cls) {
+                    profTickTopMs = dt;
+                    profTickTopClass = a->cls->name.c_str();
+                }
+                if (tick.valid() && a->cls) {
+                    auto& stat = profClassStats[a->cls];
+                    stat.first += dt;
+                    stat.second += 1;
+                }
             }
         } else {
             if (inputHook) {
@@ -1096,6 +1118,9 @@ namespace dx {
             }
             if (inputHook) {
                 inputHook(a, -1.0f);
+            }
+            if (detail) {
+                profTickPlayerVmMs += tickNowMs() - t2;
             }
         }
         if (a->destroyed) {
@@ -1138,7 +1163,13 @@ namespace dx {
         }
 
         if (actor::Physics(a) != PHYS_None) {
-            performPhysics(a, deltaSeconds);
+            if (detail) {
+                float t4 = tickNowMs();
+                performPhysics(a, deltaSeconds);
+                profTickPhysMs += tickNowMs() - t4;
+            } else {
+                performPhysics(a, deltaSeconds);
+            }
         }
         if (a->destroyed) {
             return true;
@@ -1194,27 +1225,48 @@ namespace dx {
         timeSeconds += delta;
         levelinfo::TimeSeconds(levelInfo) = timeSeconds;
         std::time_t now = std::time(nullptr);
-        std::tm local = *std::localtime(&now);
-        levelinfo::Year(levelInfo) = local.tm_year + 1900;
-        levelinfo::Month(levelInfo) = local.tm_mon + 1;
-        levelinfo::DayOfWeek(levelInfo) = local.tm_wday;
-        levelinfo::Day(levelInfo) = local.tm_mday;
-        levelinfo::Hour(levelInfo) = local.tm_hour;
-        levelinfo::Minute(levelInfo) = local.tm_min;
-        levelinfo::Second(levelInfo) = local.tm_sec;
+        static std::time_t lastCalendarSec = 0;
+        if (now != lastCalendarSec) {
+            lastCalendarSec = now;
+            std::tm local = *std::localtime(&now);
+            levelinfo::Year(levelInfo) = local.tm_year + 1900;
+            levelinfo::Month(levelInfo) = local.tm_mon + 1;
+            levelinfo::DayOfWeek(levelInfo) = local.tm_wday;
+            levelinfo::Day(levelInfo) = local.tm_mday;
+            levelinfo::Hour(levelInfo) = local.tm_hour;
+            levelinfo::Minute(levelInfo) = local.tm_min;
+            levelinfo::Second(levelInfo) = local.tm_sec;
+        }
         delta = std::clamp(delta, 0.005f, 0.4f);
         frame++;
 
+        auto nowMs = []() {
+            return profNowMs();
+        };
+        float tw0 = nowMs();
         paused = !levelinfo::Pauser(levelInfo).empty();
-        collisionHash.sync(actors);
+        collisionHash.sync(actors, firstDynamicActor);
         if (localPlayer && !localPlayer->destroyed) {
             Vector viewLocation = actor::Location(localPlayer);
-            for (UObject* a : actors) {
+            for (size_t i = firstDynamicActor; i < actors.size(); i++) {
+                UObject* a = actors[i];
                 if (a && !a->destroyed && !actor::bStatic(a)) {
                     actor::DistanceFromPlayer(a) = (actor::Location(a) - viewLocation).size();
                 }
             }
         }
+        float tw1 = nowMs();
+        profSyncMs = tw1 - tw0;
+        profTickPlayerVmMs = 0;
+        profTickActorVmMs = 0;
+        profTickVmCount = 0;
+        profTickTopMs = 0;
+        profTickTopClass = "";
+        profTickPhysMs = 0;
+        if (profDetail) {
+            profClassStats.clear();
+        }
+        int tickedActors = 0;
         if (!paused) {
             inTick = true;
             newlySpawned.clear();
@@ -1224,6 +1276,7 @@ namespace dx {
                 if (!a || a->destroyed) {
                     continue;
                 }
+                tickedActors++;
                 updated += tickActor(a, delta) ? 1 : 0;
             }
             while (!newlySpawned.empty() && updated) {
@@ -1233,14 +1286,19 @@ namespace dx {
                 for (auto it = pending.rbegin(); it != pending.rend(); ++it) {
                     UObject* a = *it;
                     if (!a->destroyed && actor::bTicked(a) != tickParity) {
+                        tickedActors++;
                         updated += tickActor(a, delta) ? 1 : 0;
                     }
                 }
             }
             inTick = false;
+            float tw2 = nowMs();
+            profActorMs = tw2 - tw1;
             if (!levelinfo::bPlayersOnly(levelInfo)) {
                 aiEvents();
             }
+            profAiMs = nowMs() - tw2;
+            profTickedCount = tickedActors;
         } else {
             for (size_t i = firstDynamicActor; i < actors.size(); i++) {
                 UObject* a = actors[i];

@@ -111,7 +111,18 @@ namespace dx {
         bool loaded = true;
         bool destroyed = false;
         bool singular = false;
+        uint16_t typeBits = 0;
         std::unique_ptr<StateFrame> stateFrame;
+    };
+
+    enum : uint16_t {
+        OBJ_Property = 1 << 0,
+        OBJ_Function = 1 << 1,
+        OBJ_State = 1 << 2,
+        OBJ_Class = 1 << 3,
+        OBJ_Texture = 1 << 4,
+        OBJ_Mesh = 1 << 5,
+        OBJ_LodMesh = 1 << 6,
     };
 
     class UField : public UObject {
@@ -179,6 +190,7 @@ namespace dx {
 
     class UFunction : public UStruct {
     public:
+        UFunction() { typeBits |= OBJ_Function; }
         void serialize(Reader& reader, Linker& linker) override;
         void linkFunction();
 
@@ -194,6 +206,7 @@ namespace dx {
 
     class UState : public UStruct {
     public:
+        UState() { typeBits |= OBJ_State; }
         void serialize(Reader& reader, Linker& linker) override;
         void linkState();
         UFunction* findStateFunction(Name functionName) const;
@@ -213,6 +226,7 @@ namespace dx {
 
     class UClass : public UState {
     public:
+        UClass() { typeBits |= OBJ_Class; }
         ~UClass() override;
         void serialize(Reader& reader, Linker& linker) override;
         void linkClass();
@@ -295,5 +309,53 @@ namespace dx {
     const T* cast(const UObject* object)
     {
         return dynamic_cast<const T*>(object);
+    }
+
+    template <>
+    inline UProperty* cast<UProperty>(UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Property)) ? static_cast<UProperty*>(object) : nullptr;
+    }
+
+    template <>
+    inline const UProperty* cast<UProperty>(const UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Property)) ? static_cast<const UProperty*>(object) : nullptr;
+    }
+
+    template <>
+    inline UFunction* cast<UFunction>(UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Function)) ? static_cast<UFunction*>(object) : nullptr;
+    }
+
+    template <>
+    inline const UFunction* cast<UFunction>(const UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Function)) ? static_cast<const UFunction*>(object) : nullptr;
+    }
+
+    template <>
+    inline UState* cast<UState>(UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_State)) ? static_cast<UState*>(object) : nullptr;
+    }
+
+    template <>
+    inline const UState* cast<UState>(const UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_State)) ? static_cast<const UState*>(object) : nullptr;
+    }
+
+    template <>
+    inline UClass* cast<UClass>(UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Class)) ? static_cast<UClass*>(object) : nullptr;
+    }
+
+    template <>
+    inline const UClass* cast<UClass>(const UObject* object)
+    {
+        return (object && (object->typeBits & OBJ_Class)) ? static_cast<const UClass*>(object) : nullptr;
     }
 }

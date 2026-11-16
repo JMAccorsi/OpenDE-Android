@@ -36,7 +36,13 @@ namespace dx {
         std::filesystem::path findGameRoot(const std::filesystem::path& fallback);
         std::filesystem::path resolveSubdir(const std::filesystem::path& root, std::string_view name);
         std::filesystem::path userDirectory();
-        void initialize(const std::filesystem::path& systemDirectory);
+        void useMod(const std::filesystem::path& directory);
+        const std::filesystem::path& modDirectory();
+        std::filesystem::path resolveCase(const std::filesystem::path& path);
+        std::filesystem::path findFile(std::string relativeToSystem);
+        void initialize(const std::filesystem::path& systemDirectory,
+                        const std::filesystem::path& systemIniPath = {},
+                        const std::filesystem::path& userIniPath = {});
         Ini& system();
         Ini& user();
         Ini* forName(Name configName);

@@ -9,6 +9,7 @@
 #include <SDL_system.h>
 #endif
 
+#include <algorithm>
 #include <cstdlib>
 #include <fstream>
 #include <iomanip>
@@ -48,6 +49,7 @@ namespace dx {
 
         struct ConfigState {
             std::filesystem::path systemDirectory;
+            std::filesystem::path modDirectory;
             std::string activeLanguage = "int";
             std::string initialLanguage = "int";
             Ini system;
@@ -541,14 +543,18 @@ namespace dx {
         {
 #ifdef __ANDROID__
             std::error_code error;
+            std::filesystem::path directory("/storage/emulated/0/OpenDE/User");
             if (const char* ext = SDL_AndroidGetExternalStoragePath()) {
-                std::filesystem::path directory(ext);
-                std::filesystem::create_directories(directory, error);
+                std::filesystem::path extDir(ext);
+                std::filesystem::create_directories(extDir, error);
                 if (!error) {
-                    return directory;
+                    directory = std::move(extDir);
                 }
             }
-            std::filesystem::path directory("/storage/emulated/0/OpenDE/User");
+            if (!state().modDirectory.empty()) {
+                directory /= "mods";
+                directory /= state().modDirectory.filename();
+            }
             std::filesystem::create_directories(directory, error);
             return directory;
 #else
@@ -556,17 +562,112 @@ namespace dx {
 #ifdef _WIN32
             if (!xdg) {
                 if (char* pref = SDL_GetPrefPath("", "deusex")) {
-                    return fromUtf8(pref);
+                    std::filesystem::path directory = fromUtf8(pref);
+                    if (!state().modDirectory.empty()) {
+                        directory /= "mods";
+                        directory /= state().modDirectory.filename();
+                    }
+                    std::error_code error;
+                    std::filesystem::create_directories(directory, error);
+                    return directory;
                 }
             }
 #endif
             const char* home = std::getenv("HOME");
             std::filesystem::path base = xdg ? std::filesystem::path(xdg) : (home ? std::filesystem::path(home) / ".local" / "share" : std::filesystem::temp_directory_path());
             std::filesystem::path directory = base / "deusex";
+            if (!state().modDirectory.empty()) {
+                directory /= "mods";
+                directory /= state().modDirectory.filename();
+            }
             std::error_code error;
             std::filesystem::create_directories(directory, error);
             return directory;
 #endif
+        }
+
+        void useMod(const std::filesystem::path& directory)
+        {
+            state().modDirectory = directory;
+        }
+
+        const std::filesystem::path& modDirectory()
+        {
+            return state().modDirectory;
+        }
+
+        std::filesystem::path resolveCase(const std::filesystem::path& path)
+        {
+            std::error_code ec;
+            if (std::filesystem::exists(path, ec)) {
+                return path;
+            }
+            std::vector<std::string> parts;
+            std::filesystem::path root;
+            for (const auto& part : path) {
+                if (part.empty()) {
+                    continue;
+                }
+                if (parts.empty() && path.has_root_path() && (part == path.root_name() || part == path.root_directory() || part == "/")) {
+                    root /= part;
+                    continue;
+                }
+                parts.push_back(part.string());
+            }
+            if (root.empty()) {
+                root = ".";
+            }
+            std::filesystem::path cur = root;
+            for (const std::string& segment : parts) {
+                if (segment == ".") {
+                    continue;
+                }
+                if (segment == "..") {
+                    cur /= "..";
+                    continue;
+                }
+                std::filesystem::path exact = cur / segment;
+                if (std::filesystem::exists(exact, ec)) {
+                    cur = exact;
+                    continue;
+                }
+                bool found = false;
+                for (const auto& entry : std::filesystem::directory_iterator(cur, ec)) {
+                    if (ec) {
+                        break;
+                    }
+                    if (iequals(entry.path().filename().string(), segment)) {
+                        cur = entry.path();
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    return path;
+                }
+            }
+            return cur;
+        }
+
+        std::filesystem::path findFile(std::string relativeToSystem)
+        {
+            std::replace(relativeToSystem.begin(), relativeToSystem.end(), '\\', '/');
+            std::vector<std::filesystem::path> systems;
+            if (!state().modDirectory.empty()) {
+                std::filesystem::path modSys = resolveSubdir(state().modDirectory, "System");
+                if (!modSys.empty()) {
+                    systems.push_back(modSys);
+                }
+            }
+            systems.push_back(state().systemDirectory);
+            std::error_code ec;
+            for (const std::filesystem::path& system : systems) {
+                std::filesystem::path candidate = resolveCase((system / relativeToSystem).lexically_normal());
+                if (std::filesystem::is_regular_file(candidate, ec)) {
+                    return candidate;
+                }
+            }
+            return {};
         }
 
         void loadPreferred(Ini& ini, const std::filesystem::path& userFile, const std::filesystem::path& gameFile, const std::filesystem::path& fallbackFile)
@@ -577,13 +678,97 @@ namespace dx {
             ini.path = userFile;
         }
 
-        void initialize(const std::filesystem::path& systemDirectory)
+        namespace {
+            std::filesystem::path findModIni(const std::filesystem::path& modSys, std::string_view name)
+            {
+                if (modSys.empty()) {
+                    return {};
+                }
+                std::string exact = std::string(name) + ".ini";
+                std::filesystem::path exactPath = resolveCase(modSys / exact);
+                std::error_code ec;
+                if (std::filesystem::is_regular_file(exactPath, ec)) {
+                    return exactPath;
+                }
+                std::vector<std::filesystem::path> candidates;
+                for (const auto& entry : std::filesystem::directory_iterator(modSys, ec)) {
+                    if (ec || !entry.is_regular_file()) {
+                        continue;
+                    }
+                    if (iequals(entry.path().extension().string(), ".ini")) {
+                        candidates.push_back(entry.path());
+                    }
+                }
+                std::sort(candidates.begin(), candidates.end());
+                for (const auto& candidate : candidates) {
+                    Ini probe;
+                    if (probe.load(candidate) && probe.get("Engine.Engine", "GameRenderDevice").has_value()) {
+                        return candidate;
+                    }
+                }
+                return {};
+            }
+
+            std::filesystem::path findModUserIni(const std::filesystem::path& modSys)
+            {
+                if (modSys.empty()) {
+                    return {};
+                }
+                std::filesystem::path direct = resolveCase(modSys / "User.ini");
+                std::error_code ec;
+                if (std::filesystem::is_regular_file(direct, ec)) {
+                    return direct;
+                }
+                std::vector<std::filesystem::path> candidates;
+                for (const auto& entry : std::filesystem::directory_iterator(modSys, ec)) {
+                    if (ec || !entry.is_regular_file()) {
+                        continue;
+                    }
+                    std::string stem = lower(entry.path().stem().string());
+                    if (iequals(entry.path().extension().string(), ".ini") &&
+                        stem.find("user") != std::string::npos) {
+                        candidates.push_back(entry.path());
+                    }
+                }
+                std::sort(candidates.begin(), candidates.end());
+                return candidates.empty() ? std::filesystem::path{} : candidates.front();
+            }
+
+            std::string userCopyName(const std::filesystem::path& path, const char* fallback)
+            {
+                return path.empty() ? std::string(fallback) : path.filename().string();
+            }
+        }
+
+        void initialize(const std::filesystem::path& systemDirectory,
+                        const std::filesystem::path& systemIniPath,
+                        const std::filesystem::path& userIniPath)
         {
             ConfigState& s = state();
             s.systemDirectory = systemDirectory;
             std::filesystem::path userDir = userDirectory();
-            loadPreferred(s.system, userDir / "DeusEx.ini", systemDirectory / "DeusEx.ini", systemDirectory / "Default.ini");
-            loadPreferred(s.user, userDir / "User.ini", systemDirectory / "User.ini", systemDirectory / "DefUser.ini");
+            std::filesystem::path modSys = s.modDirectory.empty() ? std::filesystem::path{} : resolveSubdir(s.modDirectory, "System");
+
+            std::filesystem::path gameSystemIni = !systemIniPath.empty() ? systemIniPath : findModIni(modSys, "DeusEx");
+            if (gameSystemIni.empty()) {
+                gameSystemIni = resolveCase(systemDirectory / "DeusEx.ini");
+            }
+            std::filesystem::path gameUserIni = !userIniPath.empty() ? userIniPath : findModUserIni(modSys);
+            if (gameUserIni.empty()) {
+                gameUserIni = resolveCase(systemDirectory / "User.ini");
+            }
+
+            std::filesystem::path userSysDir = s.modDirectory.empty() ? userDir : (userDir / "System");
+            std::error_code ec;
+            std::filesystem::create_directories(userSysDir, ec);
+            loadPreferred(s.system,
+                          userSysDir / userCopyName(systemIniPath, "DeusEx.ini"),
+                          gameSystemIni,
+                          resolveCase(systemDirectory / "Default.ini"));
+            loadPreferred(s.user,
+                          userSysDir / userCopyName(userIniPath, "User.ini"),
+                          gameUserIni,
+                          resolveCase(systemDirectory / "DefUser.ini"));
             if (auto lang = s.system.get("Engine.Engine", "Language")) {
                 s.activeLanguage = normalizeLanguage(*lang);
             } else {
@@ -616,7 +801,12 @@ namespace dx {
                 return it->second.get();
             }
             auto ini = std::make_unique<Ini>();
-            loadPreferred(*ini, userDirectory() / (configName.str() + ".ini"), state().systemDirectory / (configName.str() + ".ini"), state().systemDirectory / (configName.str() + ".ini"));
+            std::filesystem::path userSysDir = state().modDirectory.empty() ? userDirectory() : (userDirectory() / "System");
+            std::filesystem::path modSys = state().modDirectory.empty() ? std::filesystem::path{} : resolveSubdir(state().modDirectory, "System");
+            std::filesystem::path iniFile = std::string(configName.str()) + ".ini";
+            std::filesystem::path modIni = modSys.empty() ? std::filesystem::path{} : resolveCase(modSys / iniFile);
+            std::filesystem::path sysIni = resolveCase(state().systemDirectory / iniFile);
+            loadPreferred(*ini, userSysDir / iniFile, modIni.empty() ? sysIni : modIni, sysIni);
             Ini* result = ini.get();
             state().others.emplace(key, std::move(ini));
             return result;
@@ -655,15 +845,20 @@ namespace dx {
                 }
                 auto ini = std::make_unique<Ini>();
                 std::filesystem::path userSysDir = resolveSubdir(userDirectory(), "System");
+                std::filesystem::path modSysDir = s.modDirectory.empty() ? std::filesystem::path{} : resolveSubdir(s.modDirectory, "System");
                 bool loaded = false;
                 if (!iequals(lang, "int")) {
                     std::string normLang = normalizeLanguage(lang);
                     loaded = loadCaseInsensitive(*ini, resolveSubdir(userSysDir, normLang), std::string(package) + ".int")
                         || loadCaseInsensitive(*ini, userSysDir, std::string(package) + "." + normLang)
+                        || (!modSysDir.empty() && loadCaseInsensitive(*ini, resolveSubdir(modSysDir, normLang), std::string(package) + ".int"))
+                        || (!modSysDir.empty() && loadCaseInsensitive(*ini, modSysDir, std::string(package) + "." + normLang))
+                        || (!modSysDir.empty() && loadCaseInsensitive(*ini, modSysDir, std::string(package) + ".int"))
                         || loadCaseInsensitive(*ini, resolveSubdir(s.systemDirectory, normLang), std::string(package) + ".int")
                         || loadCaseInsensitive(*ini, s.systemDirectory, std::string(package) + "." + normLang);
                 } else {
                     loaded = loadCaseInsensitive(*ini, userSysDir, std::string(package) + ".int")
+                        || (!modSysDir.empty() && loadCaseInsensitive(*ini, modSysDir, std::string(package) + ".int"))
                         || loadCaseInsensitive(*ini, s.systemDirectory, std::string(package) + ".int");
                 }
                 (void)loaded;
@@ -789,9 +984,15 @@ namespace dx {
             ConfigState& s = state();
             std::string filename = std::string(package) + ".u";
             std::filesystem::path userSysDir = resolveSubdir(userDirectory(), "System");
+            std::filesystem::path modSysDir = s.modDirectory.empty() ? std::filesystem::path{} : resolveSubdir(s.modDirectory, "System");
             if (!iequals(s.activeLanguage, "int")) {
                 if (auto p = findFileCaseInsensitive(resolveSubdir(userSysDir, s.activeLanguage), filename); !p.empty()) {
                     return p;
+                }
+                if (!modSysDir.empty()) {
+                    if (auto p = findFileCaseInsensitive(resolveSubdir(modSysDir, s.activeLanguage), filename); !p.empty()) {
+                        return p;
+                    }
                 }
                 if (auto p = findFileCaseInsensitive(resolveSubdir(s.systemDirectory, s.activeLanguage), filename); !p.empty()) {
                     return p;
@@ -799,6 +1000,11 @@ namespace dx {
             }
             if (auto p = findFileCaseInsensitive(userSysDir, filename); !p.empty()) {
                 return p;
+            }
+            if (!modSysDir.empty()) {
+                if (auto p = findFileCaseInsensitive(modSysDir, filename); !p.empty()) {
+                    return p;
+                }
             }
             return findFileCaseInsensitive(s.systemDirectory, filename);
         }

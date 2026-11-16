@@ -1,3 +1,4 @@
+#include "core/prof_clock.h"
 #include "render/scene_renderer.h"
 
 #include "core/objects.h"
@@ -1523,12 +1524,24 @@ namespace dx {
 
     void SceneRenderer::drawFrameContent(const View& view, const std::vector<UObject*>& actors, UObject* viewActor, bool occlude)
     {
+        auto nowMs = []() {
+            return profNowMs();
+        };
         device->useShader();
         applyClip(view);
+        float t0 = nowMs();
         drawLevelGeometry(view, false);
+        float t1 = nowMs();
         drawActors(actors, view, viewActor, occlude);
+        float t2 = nowMs();
         drawLevelGeometry(view, true);
+        float t3 = nowMs();
         flushTranslucent(view);
+        float t4 = nowMs();
+        if (view.recursion == 0) {
+            frameStats.bspMs = (t1 - t0) + (t3 - t2);
+            frameStats.actorsMs = (t2 - t1) + (t4 - t3);
+        }
         if (view.clipCount) {
             View plain;
             applyClip(plain);
@@ -1560,7 +1573,19 @@ namespace dx {
         View plain;
         applyClip(plain);
         drawLevelGeometry(sky, false);
-        drawActors(actors, sky, viewActor, false);
+        if (skyIndex != 0) {
+            std::vector<UObject*> skyActors;
+            for (UObject* actor : actors) {
+                if (actor && !actor->destroyed && actorZone(actor) == skyIndex) {
+                    skyActors.push_back(actor);
+                }
+            }
+            if (!skyActors.empty()) {
+                drawActors(skyActors, sky, viewActor, false);
+            }
+        } else {
+            drawActors(actors, sky, viewActor, false);
+        }
         flushTranslucent(sky);
         drawLevelGeometry(sky, true);
     }
@@ -2443,11 +2468,12 @@ namespace dx {
         if (vertices.empty()) {
             return;
         }
+        device->upload(vertices);
         if (!extra.lightmap || renderMode == RenderMode::Unlit) {
             applyBlend(flags, 0);
             device->setCulling(false);
             device->bindTexture(renderMode == RenderMode::LightingOnly ? device->whiteTexture() : texture);
-            device->draw(vertices, Primitive::Triangles);
+            device->drawRange(0, static_cast<int32_t>(vertices.size()));
             return;
         }
         int32_t shaderFlags = SHADER_Lightmap;
@@ -2464,19 +2490,146 @@ namespace dx {
         device->bindLightmap(extra.lightmap);
         device->bindTexture(renderMode == RenderMode::LightingOnly ? device->whiteTexture() : texture);
         applyBlend(flags, shaderFlags);
-        if (extra.cull) {
-            device->setCulling(true);
-        } else {
-            device->setCulling(false);
-        }
-        device->draw(vertices, Primitive::Triangles);
+        device->setCulling(extra.cull);
+        device->drawRange(0, static_cast<int32_t>(vertices.size()));
     }
 
-    void SceneRenderer::flushBatches(std::unordered_map<uint64_t, std::vector<GLVertex>>& batches)
+    void SceneRenderer::flushBatches(std::unordered_map<uint64_t, MeshBatch>& batches)
     {
-        for (auto& [key, vertices] : batches) {
-            drawGroup(meshBatchFlags[key], meshBatchTextures[key], meshBatchExtras[key], vertices);
-            vertices.clear();
+        struct BatchDraw {
+            uint32_t flags;
+            uint32_t texture;
+            GroupExtra extra;
+            MeshBatch* batch;
+            int32_t first;
+            int32_t count;
+        };
+        static std::vector<GLVertex> combined;
+        static std::vector<BatchDraw> draws;
+        combined.clear();
+        draws.clear();
+        const bool unlitMode = (renderMode == RenderMode::Unlit);
+        const uint32_t overrideTex = (renderMode == RenderMode::LightingOnly) ? device->whiteTexture() : 0;
+        for (auto& [key, batch] : batches) {
+            if (batch.vertices.empty() && batch.refs.empty()) {
+                continue;
+            }
+            GroupExtra extra = batch.extra;
+            if (!extra.lightmap || unlitMode) {
+                extra.lightmap = 0;
+                extra.lightMask = 0;
+                extra.cull = false;
+            }
+            uint32_t tex = overrideTex ? overrideTex : batch.texture;
+            draws.push_back({ batch.flags, tex, extra, &batch, 0, 0 });
+        }
+        if (draws.empty()) {
+            return;
+        }
+        std::sort(draws.begin(), draws.end(), [](const BatchDraw& a, const BatchDraw& b) {
+            if (a.flags != b.flags) {
+                return a.flags < b.flags;
+            }
+            if (a.texture != b.texture) {
+                return a.texture < b.texture;
+            }
+            if (a.extra.lightmap != b.extra.lightmap) {
+                return a.extra.lightmap < b.extra.lightmap;
+            }
+            if (a.extra.lightMask != b.extra.lightMask) {
+                return a.extra.lightMask < b.extra.lightMask;
+            }
+            return a.extra.cull < b.extra.cull;
+        });
+        size_t outCount = 0;
+        for (size_t i = 0; i < draws.size(); i++) {
+            BatchDraw d = draws[i];
+            int32_t first = static_cast<int32_t>(combined.size());
+            if (!d.batch->vertices.empty()) {
+                combined.insert(combined.end(), d.batch->vertices.begin(), d.batch->vertices.end());
+                d.batch->vertices.clear();
+            }
+            for (const std::vector<GLVertex>* ref : d.batch->refs) {
+                combined.insert(combined.end(), ref->begin(), ref->end());
+            }
+            d.batch->refs.clear();
+            int32_t count = static_cast<int32_t>(combined.size()) - first;
+            if (outCount > 0) {
+                BatchDraw& prev = draws[outCount - 1];
+                if (prev.flags == d.flags &&
+                    prev.texture == d.texture &&
+                    prev.extra.lightmap == d.extra.lightmap &&
+                    prev.extra.lightMask == d.extra.lightMask &&
+                    prev.extra.cull == d.extra.cull) {
+                    prev.count += count;
+                    continue;
+                }
+            }
+            d.first = first;
+            d.count = count;
+            draws[outCount++] = d;
+        }
+        draws.resize(outCount);
+        device->upload(combined);
+        bool hasState = false;
+        uint32_t lastFlags = 0;
+        int32_t lastShaderFlags = 0;
+        uint32_t lastTexture = 0;
+        uint32_t lastLightmap = 0;
+        uint32_t lastLightMask = 0;
+        bool lastCull = false;
+        for (const BatchDraw& d : draws) {
+            if (!d.extra.lightmap) {
+                if (!hasState || d.flags != lastFlags || lastShaderFlags != 0) {
+                    applyBlend(d.flags, 0);
+                    lastFlags = d.flags;
+                    lastShaderFlags = 0;
+                }
+                if (!hasState || lastCull) {
+                    device->setCulling(false);
+                    lastCull = false;
+                }
+                if (!hasState || d.texture != lastTexture) {
+                    device->bindTexture(d.texture);
+                    lastTexture = d.texture;
+                }
+                hasState = true;
+                device->drawRange(d.first, d.count);
+                continue;
+            }
+            int32_t shaderFlags = SHADER_Lightmap;
+            if (d.extra.lightMask) {
+                shaderFlags |= SHADER_Dynamic;
+                if (!hasState || d.extra.lightMask != lastLightMask) {
+                    batchLights.clear();
+                    for (size_t i = 0; i < dynamicLights.size(); i++) {
+                        if (d.extra.lightMask & (1u << i)) {
+                            batchLights.push_back(dynamicLights[i]);
+                        }
+                    }
+                    device->setDynamicLights(batchLights);
+                    lastLightMask = d.extra.lightMask;
+                }
+            }
+            if (!hasState || d.extra.lightmap != lastLightmap) {
+                device->bindLightmap(d.extra.lightmap);
+                lastLightmap = d.extra.lightmap;
+            }
+            if (!hasState || d.texture != lastTexture) {
+                device->bindTexture(d.texture);
+                lastTexture = d.texture;
+            }
+            if (!hasState || d.flags != lastFlags || shaderFlags != lastShaderFlags) {
+                applyBlend(d.flags, shaderFlags);
+                lastFlags = d.flags;
+                lastShaderFlags = shaderFlags;
+            }
+            if (!hasState || d.extra.cull != lastCull) {
+                device->setCulling(d.extra.cull);
+                lastCull = d.extra.cull;
+            }
+            hasState = true;
+            device->drawRange(d.first, d.count);
         }
         device->setBlend(BlendMode::Opaque);
     }
@@ -2501,18 +2654,22 @@ namespace dx {
         state.colors = actorLightColors;
     }
 
-    void SceneRenderer::appendGroups(const std::vector<EmittedGroup>& groups, std::unordered_map<uint64_t, std::vector<GLVertex>>& opaque)
+    void SceneRenderer::appendGroups(const std::vector<EmittedGroup>& groups, std::unordered_map<uint64_t, MeshBatch>& opaque, bool persistent)
     {
         for (const EmittedGroup& group : groups) {
             if (group.translucent) {
                 queueTranslucent(group.flags, group.texture, { group.lightmap, group.lightMask, group.cull }, group.vertices);
                 continue;
             }
-            meshBatchFlags[group.key] = group.flags;
-            meshBatchTextures[group.key] = group.texture;
-            meshBatchExtras[group.key] = { group.lightmap, group.lightMask, group.cull };
-            std::vector<GLVertex>& out = opaque[group.key];
-            out.insert(out.end(), group.vertices.begin(), group.vertices.end());
+            MeshBatch& batch = opaque[group.key];
+            batch.flags = group.flags;
+            batch.texture = group.texture;
+            batch.extra = { group.lightmap, group.lightMask, group.cull };
+            if (persistent) {
+                batch.refs.push_back(&group.vertices);
+            } else {
+                batch.vertices.insert(batch.vertices.end(), group.vertices.begin(), group.vertices.end());
+            }
         }
     }
 
@@ -2604,6 +2761,30 @@ namespace dx {
         for (int slot = 0; slot < 4 && sameGeometry; slot++) {
             sameGeometry = cache.blendSequences[slot] == animState.blendSequences[slot] && cache.blendFrames[slot] == animState.blendFrames[slot];
         }
+        float eyeLimit = std::max(100.0f, (transform.origin - view.location).sizeSquared() * 0.004f);
+        if (!worldOut && sameGeometry && cache.cacheable && !cache.hasAnimatedSkin &&
+            (sceneFrame - cache.lastFullFrame) < 16 &&
+            (cache.eye - view.location).sizeSquared() <= eyeLimit &&
+            actor::AmbientGlow(actor) == cache.rawGlow &&
+            actor::ScaleGlow(actor) == cache.scaleGlow &&
+            (actor::bUnlit(actor) != 0) == cache.unlitActor &&
+            actor::Style(actor) == cache.rawStyle &&
+            actor::Skin(actor) == cache.rawSkin &&
+            actor::Texture(actor) == cache.rawTexture &&
+            !matrixTexture(World::current ? World::current->player() : nullptr)) {
+            bool dynNear = false;
+            for (const DynamicLight& dl : dynamicLights) {
+                float reach = dl.radius + cache.sphereRadius + 64.0f;
+                if ((dl.location - cache.sphereCenter).sizeSquared() < reach * reach) {
+                    dynNear = true;
+                    break;
+                }
+            }
+            if (!dynNear) {
+                appendGroups(cache.groups, meshBatches, true);
+                return;
+            }
+        }
 
         ULodMesh* lodMesh = cast<ULodMesh>(mesh);
         bool doLod = lodMesh && lodMesh->lodStrength != 0.0f && !lodMesh->collapsePointThus.empty();
@@ -2614,7 +2795,13 @@ namespace dx {
         if (doLod) {
             int32_t modelVerts = static_cast<int32_t>(lodMesh->modelVerts);
             doMorph = lodMesh->lodMorph > 0.0f;
-            float fovBias = static_cast<float>(std::tan(static_cast<double>(view.fov) * 0.008726646259971648));
+            static float cachedFov = -1.0f;
+            static float cachedFovBias = 1.0f;
+            if (view.fov != cachedFov) {
+                cachedFov = view.fov;
+                cachedFovBias = static_cast<float>(std::tan(static_cast<double>(view.fov) * 0.008726646259971648));
+            }
+            float fovBias = cachedFovBias;
             float meshVertLod = static_cast<float>(lodMesh->modelVerts) * 0.003f + 0.25f;
             float resFactor = static_cast<float>(static_cast<double>(frameWidth) * 0.00109375 + 0.3);
             float z = (actor::Location(actor) - view.location).dot(view.axes.xAxis);
@@ -2738,27 +2925,37 @@ namespace dx {
             skins[i] = matrix && i < mesh->textures.size() ? matrix : meshSkin(actor, mesh, i);
         }
         size_t environmentSlot = skins.size();
-        skins.push_back(meshEnvironmentMap(actor, mesh, zoneForActor(actor), levelData.levelInfo, matrix));
+        UObject* actorZoneObj = (lightActor == actor) ? zone : zoneForActor(actor);
+        skins.push_back(meshEnvironmentMap(actor, mesh, actorZoneObj, levelData.levelInfo, matrix));
 
         std::vector<const GLTextureInfo*>& slotInfo = scratchSlotInfo;
         std::vector<uint32_t>& slotFlags = scratchSlotFlags;
         slotInfo.assign(skins.size(), nullptr);
         slotFlags.assign(skins.size(), 0);
+        bool hasAnimatedSkin = false;
         for (size_t i = 0; i < skins.size(); i++) {
             UTexture* texture = device->animated(skins[i]);
             if (texture) {
+                if (texture != skins[i]) {
+                    hasAnimatedSkin = true;
+                }
                 slotInfo[i] = device->texture(texture);
                 slotFlags[i] = textureFlags(texture) & (PF_Masked | PF_Unlit);
             }
         }
 
-        float eyeLimit = std::max(100.0f, (transform.origin - view.location).sizeSquared() * 0.004f);
         bool cacheHit = sameGeometry && cache.cacheable && (cache.eye - view.location).sizeSquared() <= eyeLimit && cache.slotInfo == slotInfo && cache.slotFlags == slotFlags && cache.actorFlags == actorFlags && cache.unlitActor == unlitActor && cache.scaleGlow == scaleGlow && cache.glowScale == clampedGlow && sameVector(cache.ambient, ambient) && sameLights(cache.lights);
         if (cacheHit) {
+            cache.lastFullFrame = sceneFrame;
+            cache.hasAnimatedSkin = hasAnimatedSkin;
+            cache.rawGlow = glow;
+            cache.rawStyle = actor::Style(actor);
+            cache.rawSkin = actor::Skin(actor);
+            cache.rawTexture = actor::Texture(actor);
             if (worldOut) {
                 *worldOut = meshWorld;
             }
-            appendGroups(cache.groups, meshBatches);
+            appendGroups(cache.groups, meshBatches, true);
             return;
         }
         if (worldOut) {
@@ -2771,10 +2968,21 @@ namespace dx {
                 cacheable = false;
             }
         }
-        bool fogged = view.fog && !volumetrics.empty();
+        size_t fogCount = 0;
+        if (view.fog && !volumetrics.empty()) {
+            int32_t leaf = *reinterpret_cast<int32_t*>(actor::Region(lightActor) + sizeof(UObject*));
+            if (leaf < 0) {
+                leaf = pointLeaf(actor::Location(lightActor));
+            }
+            fogCount = leaf >= 0 && static_cast<size_t>(leaf) < levelData.leafVolumetrics.size() && levelData.leafStamp[static_cast<size_t>(leaf)] == visibleStamp
+                ? static_cast<size_t>(levelData.leafVolumetrics[static_cast<size_t>(leaf)])
+                : volumetrics.size();
+        }
+        bool fogged = fogCount > 0;
         if (fogged) {
             cacheable = false;
         }
+        cache.cacheable = cacheable;
         cache.slotInfo = slotInfo;
         cache.slotFlags = slotFlags;
         cache.actorFlags = actorFlags;
@@ -2794,14 +3002,9 @@ namespace dx {
         litDone.assign(meshWorld.size(), 0);
         std::vector<Vector>& fogAt = scratchFogLit;
         if (fogged) {
-            int32_t leaf = *reinterpret_cast<int32_t*>(actor::Region(lightActor) + sizeof(UObject*));
-            if (leaf < 0) {
-                leaf = pointLeaf(actor::Location(lightActor));
-            }
-            size_t count = leaf >= 0 && static_cast<size_t>(leaf) < levelData.leafVolumetrics.size() && levelData.leafStamp[static_cast<size_t>(leaf)] == visibleStamp ? static_cast<size_t>(levelData.leafVolumetrics[static_cast<size_t>(leaf)]) : volumetrics.size();
             fogAt.resize(meshWorld.size());
             for (size_t i = 0; i < meshWorld.size(); i++) {
-                fogAt[i] = meshFog(meshWorld[i], view, count);
+                fogAt[i] = meshFog(meshWorld[i], view, fogCount);
             }
         }
         for (const MeshTriangle& triangle : *triangleSource) {
@@ -2873,7 +3076,13 @@ namespace dx {
             }
         }
         cache.cacheable = cacheable;
-        appendGroups(cache.groups, meshBatches);
+        cache.lastFullFrame = sceneFrame;
+        cache.hasAnimatedSkin = hasAnimatedSkin;
+        cache.rawGlow = glow;
+        cache.rawStyle = actor::Style(actor);
+        cache.rawSkin = actor::Skin(actor);
+        cache.rawTexture = actor::Texture(actor);
+        appendGroups(cache.groups, meshBatches, true);
     }
 
     void SceneRenderer::drawSprite(UObject* actor, const View& view)
@@ -3488,6 +3697,10 @@ namespace dx {
 
     void SceneRenderer::drawActors(const std::vector<UObject*>& actors, const View& view, UObject* viewActor, bool occlude)
     {
+        auto nowMs = []() {
+            return profNowMs();
+        };
+        float ta0 = nowMs();
         device->useShader();
         device->setViewProj(view.viewProj);
         device->setPan(0, 0);
@@ -3563,6 +3776,7 @@ namespace dx {
             cullOccluded(candidates, view);
         }
 #endif
+        float ta1 = nowMs();
         std::vector<UObject*>& decals = scratchDecals;
         decals.clear();
         for (UObject* actor : candidates) {
@@ -3576,13 +3790,28 @@ namespace dx {
             setActorOrder(actor, view, actorLeaf(actor));
             drawActor(actor, view);
         }
+        float ta2 = nowMs();
         device->setOcclusionSource(view.recursion > 0 ? OcclusionSource::None : OcclusionSource::World);
         flushBatches(brushBatches);
         for (UObject* actor : decals) {
             drawDecal(actor, view);
         }
         device->setOcclusionSource(view.recursion > 0 ? OcclusionSource::None : OcclusionSource::Mesh);
+        int batchesCount = 0;
+        for (const auto& [key, batch] : meshBatches) {
+            if (!batch.vertices.empty() || !batch.refs.empty()) {
+                batchesCount++;
+            }
+        }
         flushMeshBatches();
+        float ta3 = nowMs();
+        if (view.recursion == 0) {
+            frameStats.actCandMs = ta1 - ta0;
+            frameStats.actEmitMs = ta2 - ta1;
+            frameStats.actFlushMs = ta3 - ta2;
+            frameStats.actBatches = batchesCount;
+            frameStats.actActors = static_cast<int>(candidates.size());
+        }
     }
 
     void SceneRenderer::drawScene(ULevel* level, const std::vector<UObject*>& actors, const Vector& location, const Rotator& rotation, float fov, UObject* viewActor)
@@ -3604,9 +3833,20 @@ namespace dx {
             buildLevel(level, actors);
         }
         bool fullFrame = x == 0 && y == 0 && width == frameWidth && height == frameHeight;
+        auto nowMs = []() {
+            return profNowMs();
+        };
+        if (fullFrame) {
+            frameStats = {};
+        }
         sceneFrame++;
+        float tl0 = nowMs();
         collectLights(actors);
         collectDynamicLights(location);
+        float tl1 = nowMs();
+        if (fullFrame) {
+            frameStats.lightsMs = tl1 - tl0;
+        }
         int bottom = frameHeight - y - height;
         device->setViewport(x, bottom, width, height);
         viewAspect = static_cast<float>(width) / static_cast<float>(height);
@@ -3630,12 +3870,20 @@ namespace dx {
         }
         view.fog = true;
         if (!wireframe) {
+            float to0 = nowMs();
             occludeView(view, nullptr);
+            if (fullFrame) {
+                frameStats.occludeMs = nowMs() - to0;
+            }
         }
         if (levelData.hasBackdrop && !wireframe) {
+            float ts0 = nowMs();
             drawSky(view, actors, viewActor);
             device->setDepthWrite(true);
             device->clear(false, true, 1.0f);
+            if (fullFrame) {
+                frameStats.skyMs = nowMs() - ts0;
+            }
         }
         if (!levelData.mirrors.empty() && !wireframe) {
             drawMirrors(view, actors);
@@ -3649,7 +3897,11 @@ namespace dx {
             device->beginOcclusion();
             drawFrameContent(view, actors, viewActor, fullFrame);
             device->applyOcclusion(sceneNearPlane, sceneFarPlane, view.tanHalfWidth, view.tanHalfHeight);
+            float tc0 = nowMs();
             drawCoronas(view, x, y, width, height);
+            if (fullFrame) {
+                frameStats.coronasMs = nowMs() - tc0;
+            }
         }
         if (renderMode == RenderMode::ZonePortal) {
             drawPortals(view);

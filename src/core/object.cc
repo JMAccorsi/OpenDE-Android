@@ -734,6 +734,7 @@ namespace dx {
     UProperty::UProperty(PropType propertyType)
         : type(propertyType)
     {
+        typeBits |= OBJ_Property;
     }
 
     void UProperty::serialize(Reader& reader, Linker& source)
