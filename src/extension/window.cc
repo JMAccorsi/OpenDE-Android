@@ -203,7 +203,7 @@ namespace dx::extension {
     float extendedVirtualWidth()
     {
         float realWidth = std::ceil(state().viewportWidth / virtualScale());
-        return std::max(std::min(realWidth, std::ceil(fittedHeight() / virtualScale()) * 16.0f / 9.0f), virtualWidth());
+        return std::max(std::min(realWidth, std::ceil(std::ceil(fittedHeight() / virtualScale()) * 16.0f / 9.0f)), virtualWidth());
     }
 
     bool spansSafeArea(UWindow* window, float absoluteX)
@@ -1701,12 +1701,15 @@ namespace dx::extension {
         if (lastClickWindow == window) {
             lastClickWindow = nullptr;
         }
+        if (pressWindow == window) {
+            pressWindow = nullptr;
+        }
     }
 
     void URootWindow::postDrawWindow(UGC* gc)
     {
         UModalWindow::postDrawWindow(gc);
-        if (!isCursorVisible() || state().touchInputActive) {
+        if (!isCursorVisible()) {
             return;
         }
         float relativeX = 0;
@@ -1725,6 +1728,9 @@ namespace dx::extension {
             pointY += current->usedY;
         }
         for (UWindow* current = focus; current && !cursor; current = current->parent()) {
+            if (current == this && state().touchInputActive) {
+                break;
+            }
             if (window::defaultCursor(current)) {
                 cursor = window::defaultCursor(current);
                 shadow = window::defaultCursorShadow(current);
@@ -1939,6 +1945,7 @@ namespace dx::extension {
             return isModalOpen();
         }
         if (pressed) {
+            pressWindow = focus;
             if (!focus->sensitive()) {
                 return isModalOpen();
             }
@@ -1976,7 +1983,9 @@ namespace dx::extension {
             }
             return isModalOpen();
         }
-        if (focus->rawMouseButtonPressed(relativeX, relativeY, key, IST_Release)) {
+        bool grabbedSincePress = pressWindow && pressWindow != focus && focus == windowOf(rootwindow::grabbedWindow(this));
+        pressWindow = nullptr;
+        if (!grabbedSincePress && focus->rawMouseButtonPressed(relativeX, relativeY, key, IST_Release)) {
             return true;
         }
         float px = relativeX;
@@ -2071,7 +2080,11 @@ namespace dx::extension {
             } else if (clipped) {
                 gc->pushClip(offsetX, offsetY, window->width(), window->height());
             }
-            gc->resetState(window, offsetX, offsetY);
+            static const Name focusOverlayName("MenuFocusOverlay");
+            float drawOffsetX = (window->cls && window->cls->name == focusOverlayName && window->parent() == state().root)
+                ? (offsetX - window->usedX)
+                : offsetX;
+            gc->resetState(window, drawOffsetX, offsetY);
             window->drawWindow(gc);
             UWindow* child = window->firstChild();
             while (child) {
@@ -2875,7 +2888,7 @@ namespace dx::extension {
                 while (true) {
                     UWindow* hit = nullptr;
                     for (UWindow* child = current->lastChild(); child; child = child->prevSibling()) {
-                        if (child->visible() && child->usedX <= x && child->usedY <= y && child->usedX + child->width() > x && child->usedY + child->height() > y) {
+                        if (child->visible() && !isPassThroughOverlay(child) && child->usedX <= x && child->usedY <= y && child->usedX + child->width() > x && child->usedY + child->height() > y) {
                             hit = child;
                             break;
                         }
@@ -3823,6 +3836,103 @@ namespace dx::extension {
         return s.root->onMouseButton(key, pressed);
     }
 
+    namespace {
+        struct HudBeltSlotRect {
+            float x0 = 0.0f;
+            float y0 = 0.0f;
+            float x1 = 0.0f;
+            float y1 = 0.0f;
+            int32_t slotNum = -1;
+        };
+
+        UWindow* findVisibleWindowByClass(UWindow* node, Name targetClass, float parentX, float parentY, float& outAbsX, float& outAbsY)
+        {
+            if (!node || node->destroyed || !node->visible()) {
+                return nullptr;
+            }
+            float absX = parentX + node->usedX;
+            float absY = parentY + node->usedY;
+            if (node->cls && node->cls->name == targetClass) {
+                outAbsX = absX;
+                outAbsY = absY;
+                return node;
+            }
+            for (UWindow* child = node->lastChild(); child; child = child->prevSibling()) {
+                if (UWindow* found = findVisibleWindowByClass(child, targetClass, absX, absY, outAbsX, outAbsY)) {
+                    return found;
+                }
+            }
+            return nullptr;
+        }
+
+        void collectHudBeltSlots(UWindow* node, float parentX, float parentY, std::vector<HudBeltSlotRect>& slots)
+        {
+            if (!node || node->destroyed || !node->visible()) {
+                return;
+            }
+            float absX = parentX + node->usedX;
+            float absY = parentY + node->usedY;
+            static const Name nameHudObjectSlot("HUDObjectSlot");
+            static const Name nameHudBeltItem("HUDBeltItem");
+            static const Name nameObjectNum("objectNum");
+            static const Name nameSlotNum("slotNum");
+            if (node->cls && (node->cls->name == nameHudObjectSlot || node->cls->name == nameHudBeltItem)) {
+                int32_t num = -1;
+                if (UProperty* prop = node->cls->findProperty(nameObjectNum)) {
+                    if (prop->type == PropType::Int) {
+                        num = *reinterpret_cast<const int32_t*>(node->data + prop->offset);
+                    }
+                } else if (UProperty* slotProp = node->cls->findProperty(nameSlotNum)) {
+                    if (slotProp->type == PropType::Int) {
+                        num = *reinterpret_cast<const int32_t*>(node->data + slotProp->offset);
+                    }
+                }
+                slots.push_back(HudBeltSlotRect { absX, absY, absX + node->width(), absY + node->height(), num });
+                return;
+            }
+            for (UWindow* child = node->firstChild(); child; child = child->nextSibling()) {
+                collectHudBeltSlots(child, absX, absY, slots);
+            }
+        }
+    }
+
+    uint8_t hitTestHudBeltKey(float screenX, float screenY)
+    {
+        State& s = state();
+        if (!s.root || s.root->destroyed || s.root->isCursorVisible() || s.root->isModalOpen()) {
+            return 0;
+        }
+        float scale = virtualScale();
+        if (scale <= 0.0f) {
+            return 0;
+        }
+        float vx = screenX / scale;
+        float vy = screenY / scale;
+
+        static const Name nameHudObjectBelt("HUDObjectBelt");
+        float beltX = 0.0f;
+        float beltY = 0.0f;
+        UWindow* belt = findVisibleWindowByClass(s.root, nameHudObjectBelt, 0.0f, 0.0f, beltX, beltY);
+        if (!belt) {
+            return 0;
+        }
+        if (vx < beltX || vx >= beltX + belt->width() || vy < beltY || vy >= beltY + belt->height()) {
+            return 0;
+        }
+
+        std::vector<HudBeltSlotRect> slots;
+        slots.reserve(10);
+        collectHudBeltSlots(belt, beltX - belt->usedX, beltY - belt->usedY, slots);
+        for (size_t i = 0; i < slots.size(); ++i) {
+            const HudBeltSlotRect& r = slots[i];
+            if (vx >= r.x0 && vx < r.x1 && vy >= r.y0 && vy < r.y1) {
+                int32_t num = (r.slotNum >= 0 && r.slotNum <= 9) ? r.slotNum : static_cast<int32_t>((i + 1) % 10);
+                return static_cast<uint8_t>(IK_0 + num);
+            }
+        }
+        return 0;
+    }
+
     UObject* rootWindow()
     {
         State& s = state();
@@ -3842,6 +3952,22 @@ namespace dx::extension {
     {
         State& s = state();
         return s.root && !s.root->destroyed && s.root->isModalOpen();
+    }
+
+    bool isEditFocused()
+    {
+        State& s = state();
+        if (!s.root || s.root->destroyed) {
+            return false;
+        }
+        UWindow* focus = s.root->focusWindow();
+        if (!focus || focus->destroyed || !focus->visible()) {
+            return false;
+        }
+        if (UEditWindow* edit = cast<UEditWindow>(focus)) {
+            return editwindow::bEditable(edit) != 0;
+        }
+        return false;
     }
 
     void setViewportSize(float width, float height)

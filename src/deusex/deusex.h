@@ -11,6 +11,7 @@ namespace dx {
 
     namespace deusex {
         void levelLoaded(World& world);
+        void applyVanillaFixes();
         void reloadWorldLocalization(World* world);
         void flushPendingLocalization(World* world);
         bool scriptedPawnTick(World& world, UObject* pawn, float deltaSeconds);

@@ -1051,7 +1051,12 @@ namespace dx {
                 }
                 registry.depth++;
                 try {
-                    execute(frame);
+                    if (function->scriptOverride) {
+                        frame.code = function->stub.data();
+                        callNative(frame, context, function, function->scriptOverride, function->returnParm ? localsPtr + function->returnParm->offset : nullptr);
+                    } else {
+                        execute(frame);
+                    }
                 } catch (...) {
                     registry.depth--;
                     if (singular) {
@@ -1541,7 +1546,12 @@ namespace dx {
             }
             registry.depth++;
             try {
-                execute(frame);
+                if (function->scriptOverride) {
+                    frame.code = function->stub.data();
+                    callNative(frame, object, function, function->scriptOverride, returnValue());
+                } else {
+                    execute(frame);
+                }
             } catch (const std::exception& error) {
                 std::fprintf(stderr, "script error in %s: %s\n", function->pathName().c_str(), error.what());
             }

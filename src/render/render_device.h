@@ -98,6 +98,7 @@ namespace dx {
         virtual void bindGammaTarget(int width, int height) = 0;
         virtual void resolveGamma(int width, int height, float exponent) = 0;
         virtual void applyGamma(int width, int height, float exponent) = 0;
+        virtual void setGamma(float exponent) = 0;
         virtual void beginScene(int width, int height, int samples, OcclusionQuality ambientOcclusion) = 0;
         virtual void endScene(int width, int height, bool fxaa) = 0;
         virtual void beginOcclusion() = 0;

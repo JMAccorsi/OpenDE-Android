@@ -50,7 +50,9 @@ namespace game {
             { "SwitchAmmo", "AMMO", "MUN.", dx::IK_SingleQuote, false, 0.640f, 0.565f, 0.82f, 0.048f },
             { "Laser", "LASER", "LASER", dx::IK_RightBracket, false, 0.885f, 0.235f, 0.78f, 0.046f },
             { "AugLight", "LIGHT", "LUZ", kKeyF12, false, 0.310f, 0.075f, 0.78f, 0.046f },
-            { "QuickSave", "Q.SAVE", "SALVAR", dx::IK_GreyPlus, false, 0.610f, 0.060f, 0.78f, 0.046f },
+            { "QuickSave", "Q.SAVE", "SALVAR", dx::IK_GreyPlus, true, 0.605f, 0.060f, 0.78f, 0.046f },
+            { "QuickLoad", "Q.LOAD", "CARREG.", dx::IK_GreySlash, true, 0.695f, 0.060f, 0.78f, 0.046f },
+            { "AugsMenu", "AUGS", "AUGS", dx::IK_None, true, 0.310f, 0.075f, 0.78f, 0.046f },
         }};
 
         constexpr const char* kTouchLayoutSection = "OpenDE.TouchLayout";
@@ -296,6 +298,10 @@ namespace game {
                 layouts_[i].scale = std::clamp(sc, 0.60f, 1.80f);
             }
         }
+        // Upgrade from older layout where QuickSave defaulted to disabled.
+        if (!dx::config::system().get(kTouchLayoutSection, kSpecs[static_cast<size_t>(TouchControlId::QuickLoad)].iniKey)) {
+            layouts_[static_cast<size_t>(TouchControlId::QuickSave)].enabled = true;
+        }
     }
 
     void TouchOverlayManager::saveLayout() const
@@ -342,7 +348,7 @@ namespace game {
         // Preset 2: Claw / Full tactical layout (higher leans/scope + belt/light/ammo enabled)
         for (size_t i = 0; i < kTouchControlCount; ++i) {
             TouchControlId id = static_cast<TouchControlId>(i);
-            layouts_[i].enabled = (id != TouchControlId::Laser);
+            layouts_[i].enabled = (id != TouchControlId::Laser && id != TouchControlId::AugLight);
         }
         layouts_[static_cast<size_t>(TouchControlId::Scope)].cx = 0.720f;
         layouts_[static_cast<size_t>(TouchControlId::Scope)].cy = 0.240f;
@@ -353,8 +359,9 @@ namespace game {
         layouts_[static_cast<size_t>(TouchControlId::SwitchAmmo)].enabled = true;
         layouts_[static_cast<size_t>(TouchControlId::BeltPrev)].enabled = true;
         layouts_[static_cast<size_t>(TouchControlId::BeltNext)].enabled = true;
-        layouts_[static_cast<size_t>(TouchControlId::AugLight)].enabled = true;
+        layouts_[static_cast<size_t>(TouchControlId::AugsMenu)].enabled = true;
         layouts_[static_cast<size_t>(TouchControlId::QuickSave)].enabled = true;
+        layouts_[static_cast<size_t>(TouchControlId::QuickLoad)].enabled = true;
     }
 
     void TouchOverlayManager::setSettings(const TouchOverlaySettings& newSettings)
@@ -465,6 +472,20 @@ namespace game {
             }
         }
         crouchToggled_ = false;
+        if (hasAugTapFinger_) {
+            if (augTapKey_ != 0 && cb.onKey) {
+                cb.onKey(augTapKey_, false);
+            }
+            hasAugTapFinger_ = false;
+            augTapKey_ = 0;
+        }
+        if (hasHudTapFinger_) {
+            if (hudTapKey_ != 0 && cb.onKey) {
+                cb.onKey(hudTapKey_, false);
+            }
+            hasHudTapFinger_ = false;
+            hudTapKey_ = 0;
+        }
     }
 
     void TouchOverlayManager::onPhysicalInput(const TouchInputCallbacks& cb)
@@ -472,8 +493,9 @@ namespace game {
         if (editorOpen_) {
             return;
         }
-        if (visible_ || hasStickFinger_ || hasLookFinger_ || crouchToggled_) {
+        if (visible_ || hasStickFinger_ || hasLookFinger_ || crouchToggled_ || hasAugTapFinger_ || hasHudTapFinger_ || augDrawerOpen_) {
             visible_ = false;
+            augDrawerOpen_ = false;
             releaseAllControls(cb);
         }
     }
@@ -696,6 +718,12 @@ namespace game {
                 if (!justWoke) {
                     size_t idx = static_cast<size_t>(hit);
                     TouchControlId id = static_cast<TouchControlId>(idx);
+                    if (id == TouchControlId::AugsMenu) {
+                        augDrawerOpen_ = !augDrawerOpen_;
+                        buttons_[idx].fingerDown = true;
+                        buttons_[idx].finger = fid;
+                        return true;
+                    }
                     if (isActionToggle(id)) {
                         crouchToggled_ = !crouchToggled_;
                         setButtonPressed(id, crouchToggled_, cb);
@@ -717,6 +745,31 @@ namespace game {
                     return true;
                 }
             }
+            if (!justWoke && augDrawerOpen_ && !hasAugTapFinger_) {
+                int augIdx = hitTestAugDrawer(x, y, drawWidth, drawHeight);
+                if (augIdx >= 0 && static_cast<size_t>(augIdx) < augEntries_.size()) {
+                    uint8_t key = augEntries_[static_cast<size_t>(augIdx)].key;
+                    if (key != 0 && cb.onKey) {
+                        hasAugTapFinger_ = true;
+                        augTapFinger_ = fid;
+                        augTapKey_ = key;
+                        cb.onKey(key, true);
+                    }
+                    return true;
+                }
+            }
+            if (!hasHudTapFinger_ && cb.hitTestHudKey) {
+                uint8_t hudKey = cb.hitTestHudKey(x * static_cast<float>(drawWidth), y * static_cast<float>(drawHeight));
+                if (hudKey != 0) {
+                    hasHudTapFinger_ = true;
+                    hudTapFinger_ = fid;
+                    hudTapKey_ = hudKey;
+                    if (cb.onKey) {
+                        cb.onKey(hudKey, true);
+                    }
+                    return true;
+                }
+            }
             if (!hasLookFinger_) {
                 hasLookFinger_ = true;
                 lookCanQuickClick_ = !justWoke;
@@ -733,6 +786,9 @@ namespace game {
             if (hasStickFinger_ && fid == stickFinger_) {
                 stickCurX_ = x;
                 stickCurY_ = y;
+                return true;
+            }
+            if ((hasAugTapFinger_ && fid == augTapFinger_) || (hasHudTapFinger_ && fid == hudTapFinger_)) {
                 return true;
             }
             // Allow smooth aim while holding Fire
@@ -760,11 +816,28 @@ namespace game {
                 hasStickFinger_ = false;
                 return true;
             }
+            if (hasAugTapFinger_ && fid == augTapFinger_) {
+                if (augTapKey_ != 0 && cb.onKey) {
+                    cb.onKey(augTapKey_, false);
+                }
+                hasAugTapFinger_ = false;
+                augTapKey_ = 0;
+                return true;
+            }
+            if (hasHudTapFinger_ && fid == hudTapFinger_) {
+                if (hudTapKey_ != 0 && cb.onKey) {
+                    cb.onKey(hudTapKey_, false);
+                }
+                hasHudTapFinger_ = false;
+                hudTapKey_ = 0;
+                return true;
+            }
             for (size_t i = 0; i < kTouchControlCount; ++i) {
                 if (i == static_cast<size_t>(TouchControlId::MoveStick)) {
                     continue;
                 }
-                if (isActionToggle(static_cast<TouchControlId>(i)) && buttons_[i].fingerDown && buttons_[i].finger == fid) {
+                if ((isActionToggle(static_cast<TouchControlId>(i)) || i == static_cast<size_t>(TouchControlId::AugsMenu))
+                    && buttons_[i].fingerDown && buttons_[i].finger == fid) {
                     buttons_[i].fingerDown = false;
                     return true;
                 }
@@ -846,7 +919,9 @@ namespace game {
                 continue;
             }
 
-            const bool pressed = buttons_[i].active || (id == TouchControlId::Crouch && crouchToggled_);
+            const bool pressed = buttons_[i].active
+                || (id == TouchControlId::Crouch && crouchToggled_)
+                || (id == TouchControlId::AugsMenu && augDrawerOpen_);
             dx::LinearColor fill = pressed
                 ? dx::LinearColor { 0.12f, 0.42f, 0.56f, std::min(0.95f, alpha * 1.15f) }
                 : dx::LinearColor { 0.04f, 0.09f, 0.14f, alpha * 0.62f };
@@ -871,6 +946,116 @@ namespace game {
                 ? (cy + r * 0.22f)
                 : cy;
             drawText(canvas, controlLabel(id, ptBr), cx, textY, textScale, fg, r * 1.62f);
+        }
+
+        if (augDrawerOpen_) {
+            renderAugDrawer(canvas, ptBr);
+        }
+    }
+
+    namespace {
+        struct AugDrawerMetrics {
+            int cols = 0;
+            float startX = 0.0f;
+            float startY = 0.0f;
+            float chipW = 0.0f;
+            float chipH = 0.0f;
+            float gapX = 0.0f;
+            float gapY = 0.0f;
+        };
+
+        AugDrawerMetrics computeAugDrawerMetrics(size_t count, float fw, float fh)
+        {
+            AugDrawerMetrics m;
+            if (count == 0) {
+                return m;
+            }
+            m.cols = static_cast<int>(std::min<size_t>(count, 6));
+            m.chipW = std::clamp(fw * 0.125f, 110.0f, 180.0f);
+            m.chipH = std::clamp(fh * 0.068f, 44.0f, 68.0f);
+            m.gapX = fw * 0.008f;
+            m.gapY = fh * 0.010f;
+            float totalW = static_cast<float>(m.cols) * m.chipW + static_cast<float>(m.cols - 1) * m.gapX;
+            m.startX = (fw - totalW) * 0.5f;
+            m.startY = fh * 0.145f;
+            return m;
+        }
+    }
+
+    int TouchOverlayManager::hitTestAugDrawer(float xNorm, float yNorm, int drawWidth, int drawHeight) const
+    {
+        if (!augDrawerOpen_ || augEntries_.empty() || drawWidth <= 0 || drawHeight <= 0) {
+            return -1;
+        }
+        const float fw = static_cast<float>(drawWidth);
+        const float fh = static_cast<float>(drawHeight);
+        const float px = xNorm * fw;
+        const float py = yNorm * fh;
+        AugDrawerMetrics m = computeAugDrawerMetrics(augEntries_.size(), fw, fh);
+        for (size_t i = 0; i < augEntries_.size(); ++i) {
+            int col = static_cast<int>(i) % m.cols;
+            int row = static_cast<int>(i) / m.cols;
+            float x0 = m.startX + static_cast<float>(col) * (m.chipW + m.gapX);
+            float y0 = m.startY + static_cast<float>(row) * (m.chipH + m.gapY);
+            if (px >= x0 && px < x0 + m.chipW && py >= y0 && py < y0 + m.chipH) {
+                return static_cast<int>(i);
+            }
+        }
+        return -1;
+    }
+
+    void TouchOverlayManager::renderAugDrawer(dx::Canvas2D& canvas, bool ptBr)
+    {
+        const float fw = canvas.width();
+        const float fh = canvas.height();
+        const float alpha = std::clamp(settings_.opacity, 0.25f, 0.95f);
+
+        if (augEntries_.empty()) {
+            const float boxW = std::clamp(fw * 0.26f, 220.0f, 360.0f);
+            const float boxH = std::clamp(fh * 0.065f, 42.0f, 64.0f);
+            const float x0 = (fw - boxW) * 0.5f;
+            const float y0 = fh * 0.145f;
+            canvas.drawRect(x0, y0, boxW, boxH, { 0.03f, 0.07f, 0.12f, alpha * 0.85f }, dx::BlendStyle::Normal);
+            drawRectOutline(canvas, x0, y0, boxW, boxH, 2.0f, { 0.36f, 0.82f, 0.98f, 0.85f });
+            drawText(canvas, ptBr ? "SEM AUGS ATIVOS" : "NO ACTIVE AUGS", x0 + boxW * 0.5f, y0 + boxH * 0.5f,
+                     std::max(2.0f, boxH * 0.055f), { 0.85f, 0.95f, 1.00f, 0.95f }, boxW * 0.88f);
+            return;
+        }
+
+        AugDrawerMetrics m = computeAugDrawerMetrics(augEntries_.size(), fw, fh);
+        const int rows = static_cast<int>((augEntries_.size() + static_cast<size_t>(m.cols) - 1) / static_cast<size_t>(m.cols));
+        const float pad = 8.0f;
+        const float panelW = static_cast<float>(m.cols) * m.chipW + static_cast<float>(m.cols - 1) * m.gapX + pad * 2.0f;
+        const float panelH = static_cast<float>(rows) * m.chipH + static_cast<float>(rows - 1) * m.gapY + pad * 2.0f;
+        canvas.drawRect(m.startX - pad, m.startY - pad, panelW, panelH, { 0.02f, 0.05f, 0.09f, std::min(0.88f, alpha + 0.15f) }, dx::BlendStyle::Normal);
+        drawRectOutline(canvas, m.startX - pad, m.startY - pad, panelW, panelH, 1.5f, { 0.30f, 0.72f, 0.92f, 0.70f });
+
+        for (size_t i = 0; i < augEntries_.size(); ++i) {
+            const TouchAugEntry& entry = augEntries_[i];
+            int col = static_cast<int>(i) % m.cols;
+            int row = static_cast<int>(i) / m.cols;
+            float x0 = m.startX + static_cast<float>(col) * (m.chipW + m.gapX);
+            float y0 = m.startY + static_cast<float>(row) * (m.chipH + m.gapY);
+
+            dx::LinearColor fill = entry.active
+                ? dx::LinearColor { 0.12f, 0.48f, 0.62f, std::min(0.95f, alpha + 0.25f) }
+                : dx::LinearColor { 0.05f, 0.10f, 0.16f, std::min(0.88f, alpha + 0.10f) };
+            dx::LinearColor rim = entry.active
+                ? dx::LinearColor { 0.65f, 0.98f, 1.00f, 0.98f }
+                : dx::LinearColor { 0.32f, 0.72f, 0.90f, 0.75f };
+            dx::LinearColor fg = entry.active
+                ? dx::LinearColor { 1.00f, 1.00f, 1.00f, 1.00f }
+                : dx::LinearColor { 0.84f, 0.94f, 1.00f, 0.92f };
+
+            canvas.drawRect(x0, y0, m.chipW, m.chipH, fill, dx::BlendStyle::Normal);
+            drawRectOutline(canvas, x0, y0, m.chipW, m.chipH, entry.active ? 2.5f : 1.5f, rim);
+
+            char hotkeyBuf[8];
+            std::snprintf(hotkeyBuf, sizeof(hotkeyBuf), "F%d", entry.hotKeyNum);
+            float scaleKey = std::max(1.8f, m.chipH * 0.045f);
+            float scaleName = std::max(1.8f, m.chipH * 0.050f);
+            drawText(canvas, hotkeyBuf, x0 + m.chipW * 0.5f, y0 + m.chipH * 0.28f, scaleKey, rim, m.chipW * 0.85f);
+            drawText(canvas, entry.label.c_str(), x0 + m.chipW * 0.5f, y0 + m.chipH * 0.68f, scaleName, fg, m.chipW * 0.88f);
         }
     }
 

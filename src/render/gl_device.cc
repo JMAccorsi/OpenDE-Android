@@ -64,6 +64,11 @@ namespace dx {
         shader->use();
     }
 
+    void GLRenderDevice::setGamma(float exponent)
+    {
+        shader->setGamma(exponent);
+    }
+
     void GLRenderDevice::beginScene(int width, int height, int samples, OcclusionQuality ambientOcclusion)
     {
         bool occluding = ambientOcclusion != OcclusionQuality::Off;

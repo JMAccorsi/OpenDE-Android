@@ -617,10 +617,11 @@ namespace {
             dx::deusex::configureTouchEditorChoice(touchEditorChoiceClass, [this]() {
                 touchOverlay.openEditor();
             });
+            addFixVanillaBugsChoice(gameplay, 7);
 
             dx::UObject* gameplayDefaults = gameplay->defaultObject;
             int gameplayGap = *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("choiceVerticalGap")));
-            int gameplayCut = 288 - 6 * gameplayGap;
+            int gameplayCut = 288 - 7 * gameplayGap;
             if (gameplayCut > 0) {
                 dx::deusex::spliceMenuBackground(gameplayDefaults, 55, 55 + gameplayCut);
                 *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("ClientHeight"))) -= gameplayCut;
@@ -663,6 +664,21 @@ namespace {
             std::string section = dx::config::system().get("Engine.Engine", "GameEngine").value_or("DeusEx.DeusExGameEngine");
             if (!dx::config::system().get(section, "PlayerSpeed")) {
                 dx::config::system().set(section, "PlayerSpeed", "100");
+            }
+        }
+
+        void addFixVanillaBugsChoice(dx::UClass* screen, int index)
+        {
+            dx::UClass* choice = dx::objects::createSubclass(dx::objects::findClass("DeusEx.MenuChoice_DetailTextures"), dx::Name("MenuChoice_FixVanillaBugs"));
+            *reinterpret_cast<dx::UObject**>(screen->defaultObject->propertyAddress(dx::Name("choices"), index)) = choice;
+            dx::UObject* defaults = choice->defaultObject;
+            *reinterpret_cast<std::string*>(defaults->propertyAddress(dx::Name("actionText"))) = "Fix |&Vanilla Bugs";
+            *reinterpret_cast<std::string*>(defaults->propertyAddress(dx::Name("helpText"))) = "Fixes bugs of the original game, such as stunned or gassed enemies attacking as soon as they are hit. Off matches the original game.";
+            *reinterpret_cast<std::string*>(defaults->propertyAddress(dx::Name("configSetting"))) = "ini:Engine.Engine.GameEngine FixVanillaBugs";
+            *reinterpret_cast<int32_t*>(defaults->propertyAddress(dx::Name("defaultValue"))) = 1;
+            std::string section = dx::config::system().get("Engine.Engine", "GameEngine").value_or("DeusEx.DeusExGameEngine");
+            if (!dx::config::system().get(section, "FixVanillaBugs")) {
+                dx::config::system().set(section, "FixVanillaBugs", "True");
             }
         }
 
@@ -1204,6 +1220,9 @@ namespace {
                     handleKey(dx::IK_RightMouse, true);
                     handleKey(dx::IK_RightMouse, false);
                 },
+                [](float sx, float sy) {
+                    return dx::extension::hitTestHudBeltKey(sx, sy);
+                },
             };
         }
 
@@ -1246,6 +1265,7 @@ namespace {
             if (drawWidth <= 0 || drawHeight <= 0) {
                 return;
             }
+            lastInputWasGamepad = false;
             if (touchOverlay.isEditorOpen()) {
                 touchOverlay.handleTouchEvent(event, drawWidth, drawHeight, touchCallbacks());
                 return;
@@ -1263,6 +1283,12 @@ namespace {
                     menuFinger = fid;
                     dx::extension::mouseMove(px, py);
                     dx::extension::mouseButton(dx::IK_LeftMouse, true);
+#ifdef __ANDROID__
+                    if (dx::extension::isEditFocused()) {
+                        SDL_StartTextInput();
+                        textInputRequested = true;
+                    }
+#endif
                 } else if (event.type == SDL_FINGERMOTION && hasMenuFinger && fid == menuFinger) {
                     dx::extension::mouseMove(px, py);
                 } else if (event.type == SDL_FINGERUP && hasMenuFinger && fid == menuFinger) {
@@ -1336,6 +1362,7 @@ namespace {
             float outRT = dx::console::shapeTrigger(trigR, gs.triggerThreshold);
 
             if (padActivity || outLX != 0.0f || outLY != 0.0f || outRX != 0.0f || outRY != 0.0f || outLT != 0.0f || outRT != 0.0f) {
+                lastInputWasGamepad = true;
                 touchOverlay.onPhysicalInput(touchCallbacks());
             }
 
@@ -1574,6 +1601,70 @@ namespace {
                         dx::vm::Call(console, dx::Name("PostRender")).obj(canvasActor).run();
                     }
                 }
+            }
+            if (touchOverlay.isVisible() && touchOverlay.isAugDrawerOpen() && world && world->player()) {
+                std::vector<game::TouchAugEntry> augs;
+                dx::UObject* player = world->player();
+                static const dx::Name nameAugSystem("AugmentationSystem");
+                dx::UProperty* augSysProp = (player && player->cls) ? player->cls->findProperty(nameAugSystem) : nullptr;
+                dx::UObject* augMgr = (augSysProp && augSysProp->type == dx::PropType::Object)
+                    ? *reinterpret_cast<dx::UObject* const*>(player->data + augSysProp->offset)
+                    : nullptr;
+                if (augMgr && !augMgr->destroyed && augMgr->cls) {
+                    static const dx::Name nameFirstAug("FirstAug");
+                    static const dx::Name nameNext("next");
+                    static const dx::Name nameHasIt("bHasIt");
+                    static const dx::Name nameAlwaysActive("bAlwaysActive");
+                    static const dx::Name nameIsActive("bIsActive");
+                    static const dx::Name nameHotKeyNum("HotKeyNum");
+                    static const dx::Name nameAugName("AugmentationName");
+                    dx::UProperty* firstProp = augMgr->cls->findProperty(nameFirstAug);
+                    dx::UObject* aug = (firstProp && firstProp->type == dx::PropType::Object)
+                        ? *reinterpret_cast<dx::UObject* const*>(augMgr->data + firstProp->offset)
+                        : nullptr;
+                    for (int guard = 0; aug && !aug->destroyed && aug->cls && guard < 32; ++guard) {
+                        auto readBool = [aug](dx::Name propName, bool fallback) {
+                            dx::UProperty* p = aug->cls->findProperty(propName);
+                            return (p && p->type == dx::PropType::Bool)
+                                ? (*reinterpret_cast<const uint32_t*>(aug->data + p->offset) != 0)
+                                : fallback;
+                        };
+                        bool hasIt = readBool(nameHasIt, false);
+                        bool alwaysActive = readBool(nameAlwaysActive, false);
+                        bool isActive = readBool(nameIsActive, false);
+                        dx::UProperty* hkProp = aug->cls->findProperty(nameHotKeyNum);
+                        int32_t hotKey = (hkProp && hkProp->type == dx::PropType::Int)
+                            ? *reinterpret_cast<const int32_t*>(aug->data + hkProp->offset)
+                            : 0;
+                        if (hasIt && !alwaysActive && hotKey >= 1 && hotKey <= 12) {
+                            dx::UProperty* nProp = aug->cls->findProperty(nameAugName);
+                            std::string label;
+                            if (nProp && (nProp->type == dx::PropType::Str || nProp->type == dx::PropType::String)) {
+                                label = *reinterpret_cast<const std::string*>(aug->data + nProp->offset);
+                            }
+                            if (label.empty()) {
+                                label = aug->name.str();
+                            }
+                            if (label.size() > 10) {
+                                label.resize(10);
+                            }
+                            augs.push_back(game::TouchAugEntry {
+                                std::move(label),
+                                static_cast<uint8_t>(dx::IK_F1 + (hotKey - 1)),
+                                hotKey,
+                                isActive,
+                            });
+                        }
+                        dx::UProperty* nextProp = aug->cls->findProperty(nameNext);
+                        aug = (nextProp && nextProp->type == dx::PropType::Object)
+                            ? *reinterpret_cast<dx::UObject* const*>(aug->data + nextProp->offset)
+                            : nullptr;
+                    }
+                    std::sort(augs.begin(), augs.end(), [](const game::TouchAugEntry& a, const game::TouchAugEntry& b) {
+                        return a.hotKeyNum < b.hotKeyNum;
+                    });
+                }
+                touchOverlay.setAugEntries(std::move(augs));
             }
             touchOverlay.render(
                 renderer->canvas(),
@@ -1894,6 +1985,7 @@ namespace {
             }
             viewportTime += static_cast<double>(delta);
             applyPlayerSpeed();
+            dx::deusex::applyVanillaFixes();
             applyRenderOptions();
             const double perfFreqMs = static_cast<double>(SDL_GetPerformanceFrequency()) / 1000.0;
             uint64_t tTick0 = SDL_GetPerformanceCounter();
@@ -1902,6 +1994,19 @@ namespace {
             }
             dx::deusex::flushPendingLocalization(world.get());
             dx::extension::tick(delta);
+#ifdef __ANDROID__
+            {
+                bool wantTextInput = !lastInputWasGamepad && dx::extension::isEditFocused();
+                if (wantTextInput != textInputRequested) {
+                    textInputRequested = wantTextInput;
+                    if (wantTextInput) {
+                        SDL_StartTextInput();
+                    } else {
+                        SDL_StopTextInput();
+                    }
+                }
+            }
+#endif
             dx::UObject* console = scriptConsole();
             if (console) {
                 dx::vm::Call(console, dx::Name("Tick")).f(delta).run();
@@ -2049,6 +2154,8 @@ namespace {
         float repeatTimer = 0.0f;
         bool hasMenuFinger = false;
         SDL_FingerID menuFinger = 0;
+        bool textInputRequested = false;
+        bool lastInputWasGamepad = false;
         game::TouchOverlayManager touchOverlay;
         dx::UClass* touchEditorChoiceClass = nullptr;
         float appliedPlayerSpeed = 1.0f;

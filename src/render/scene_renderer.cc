@@ -331,10 +331,8 @@ namespace dx {
         frameHeight = std::max(height, 1);
         viewAspect = static_cast<float>(frameWidth) / static_cast<float>(frameHeight);
         device->beginTextureFrame(currentTime);
-        offscreen = device->drawingToWindow() && std::abs(gammaExponent - 1.0f) >= 0.0001f;
-        if (offscreen) {
-            device->bindGammaTarget(frameWidth, frameHeight);
-        }
+        offscreen = false;
+        device->setGamma(gammaExponent);
         device->setViewport(0, 0, frameWidth, frameHeight);
         device->setDepthWrite(true);
         device->clear(true, true, 1.0f);
@@ -351,16 +349,8 @@ namespace dx {
     {
         float exponent = 1.0f / (2.5f * std::max(brightness, 0.01f));
         gammaExponent = exponent;
+        device->setGamma(exponent);
         device->flushCanvas();
-        if (offscreen) {
-            offscreen = false;
-            device->resolveGamma(frameWidth, frameHeight, exponent);
-            return;
-        }
-        if (std::abs(exponent - 1.0f) < 0.0001f) {
-            return;
-        }
-        device->applyGamma(frameWidth, frameHeight, exponent);
     }
 
     void SceneRenderer::setOptions(const RenderOptions& newOptions)

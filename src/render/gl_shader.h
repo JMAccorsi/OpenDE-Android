@@ -24,6 +24,7 @@ namespace dx {
         void setEye(const Vector& eye, const Vector& forward);
         void setClipPlanes(const float* planes, int32_t count);
         void setOcclusion(float weight);
+        void setGamma(float exponent);
         void setBlend(BlendMode mode);
         void setDynamicLights(const std::vector<DynamicLight>& lights);
         void bindTexture(uint32_t texture);
@@ -57,6 +58,7 @@ namespace dx {
             int32_t clipPlanes = -1;
             int32_t clipCount = -1;
             int32_t occlusion = -1;
+            int32_t gamma = -1;
         };
 
         struct State {
@@ -74,6 +76,7 @@ namespace dx {
             float clipPlanes[32] = {};
             int32_t clipCount = 0;
             float occlusion = 0;
+            float gamma = 1.0f;
         };
 
         void setupAttributes();
@@ -82,6 +85,7 @@ namespace dx {
         int32_t targetIndex() const;
         void markOthersStale();
         void sendState();
+        float activeGamma() const;
         void bindVao(uint32_t vao);
 
         uint32_t programs[6] = {};

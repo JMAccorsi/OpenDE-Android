@@ -20,6 +20,7 @@ namespace dx {
         void bindGammaTarget(int width, int height) override;
         void resolveGamma(int width, int height, float exponent) override;
         void applyGamma(int width, int height, float exponent) override;
+        void setGamma(float exponent) override;
         void beginScene(int width, int height, int samples, OcclusionQuality ambientOcclusion) override;
         void endScene(int width, int height, bool fxaa) override;
         void beginOcclusion() override;

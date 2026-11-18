@@ -55,10 +55,12 @@ namespace dx {
         void mouseMove(float x, float y);
         bool cursorPosition(float& x, float& y);
         bool mouseButton(uint8_t key, bool pressed);
+        uint8_t hitTestHudBeltKey(float screenX, float screenY);
         void setTouchInputActive(bool active);
         UObject* rootWindow();
         bool wantsMouse();
         bool isModalOpen();
+        bool isEditFocused();
 
         void setViewportSize(float width, float height);
         void setUIScale(float scale);

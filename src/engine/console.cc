@@ -492,6 +492,12 @@ namespace dx {
                     if (section.empty()) {
                         return "Unrecognized ini key " + className;
                     }
+                    if (iequals(propertyName, "UIScale")) {
+                        float custom = static_cast<float>(std::atof(config::system().get(section, propertyName).value_or("0").c_str()));
+                        if (custom != std::floor(custom) && std::atoi(valueRest.c_str()) == static_cast<int>(custom)) {
+                            return {};
+                        }
+                    }
                     config::system().set(section, propertyName, valueRest);
                     config::system().save();
                     applyAudioSettings();
@@ -744,8 +750,8 @@ namespace dx {
                 { IK_Joy2, "ReloadWeapon" },
                 { IK_Joy3, "ParseRightClick" },
                 { IK_Joy4, "SwitchAmmo" },
-                { IK_Joy5, "" },
-                { IK_Joy6, "" },
+                { IK_Joy5, "LeanLeft" },
+                { IK_Joy6, "LeanRight" },
                 { IK_Joy7, "TogglePlayerMenuWindow" },
                 { IK_Joy8, "ShowMainMenu" },
                 { IK_Joy9, "" },
@@ -790,8 +796,8 @@ namespace dx {
                     state.bindings[code] = value;
                 }
             }
-            if (hasDxController) {
-                for (const JoyDefault& entry : joyDefaults) {
+            for (const JoyDefault& entry : joyDefaults) {
+                if (hasDxController || (state.bindings[entry.code].empty() && entry.command[0] != '\0')) {
                     state.bindings[entry.code] = entry.command;
                 }
             }

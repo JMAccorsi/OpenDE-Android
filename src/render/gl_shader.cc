@@ -105,6 +105,7 @@ uniform vec4 uLightPosition[8];
 uniform vec4 uLightColor[8];
 uniform vec4 uLightDirection[8];
 uniform float uOcclusion;
+uniform float uGamma;
 layout(location = 0) out vec4 fragColor;
 layout(location = 1) out vec4 occlusionMask;
 mediump vec3 lightmap()
@@ -211,7 +212,8 @@ void main()
     {
         color.rgb += texel.rgb * uTint.rgb * dynamic * 2.0;
     }
-    fragColor = vec4(clamp(color.rgb + vFog, 0.0, 1.0), color.a);
+    mediump vec3 finalRgb = clamp(color.rgb + vFog, 0.0, 1.0);
+    fragColor = vec4(pow(max(finalRgb, vec3(1e-5)), vec3(uGamma)), color.a);
 }
 )";
 
@@ -630,10 +632,12 @@ void main()
             location.clipPlanes = glGetUniformLocation(program, "uClipPlanes");
             location.clipCount = glGetUniformLocation(program, "uClipCount");
             location.occlusion = glGetUniformLocation(program, "uOcclusion");
+            location.gamma = glGetUniformLocation(program, "uGamma");
             glUseProgram(program);
             glUniform1i(glGetUniformLocation(program, "uTexture"), 0);
             glUniform1i(glGetUniformLocation(program, "uLightmap"), 1);
             glUniform1f(glGetUniformLocation(program, "uDetailDistance"), 380.0f);
+            glUniform1f(location.gamma, 1.0f);
             current = index;
             sendState();
         }
@@ -761,6 +765,7 @@ void main()
         glUniform4fv(location.clipPlanes, 8, state.clipPlanes);
         glUniform1i(location.clipCount, state.clipCount);
         glUniform1f(location.occlusion, state.occlusion);
+        glUniform1f(location.gamma, activeGamma());
     }
 
     void UberShader::setViewProj(const Mat4& matrix)
@@ -871,6 +876,24 @@ void main()
         glUniform1f(locations[current].occlusion, weight);
     }
 
+    float UberShader::activeGamma() const
+    {
+        if (blendInitialized && (currentBlend == BlendMode::Modulated || currentBlend == BlendMode::Translucent)) {
+            return 1.0f;
+        }
+        return state.gamma;
+    }
+
+    void UberShader::setGamma(float exponent)
+    {
+        if (exponent == state.gamma) {
+            return;
+        }
+        state.gamma = exponent;
+        markOthersStale();
+        glUniform1f(locations[current].gamma, activeGamma());
+    }
+
     void UberShader::setTint(float r, float g, float b, float a)
     {
         if (r == state.tint[0] && g == state.tint[1] && b == state.tint[2] && a == state.tint[3]) {
@@ -891,6 +914,8 @@ void main()
         }
         currentBlend = mode;
         blendInitialized = true;
+        markOthersStale();
+        glUniform1f(locations[current].gamma, activeGamma());
         switch (mode) {
         case BlendMode::Opaque:
         case BlendMode::Masked:
@@ -980,11 +1005,18 @@ void main()
         }
         size_t bytes = vertices.size() * sizeof(GLVertex);
         bindVao(streamVao);
-        glBindBuffer(GL_ARRAY_BUFFER, streamVbo);
         if (bytes > streamCapacity || streamOffset + bytes > streamCapacity) {
-            streamCapacity = std::max(streamCapacity, std::max(bytes, size_t { 4 } << 20));
+            streamCapacity = std::max(streamCapacity, std::max(bytes, size_t { 16 } << 20));
+            if (streamVbo) {
+                glDeleteBuffers(1, &streamVbo);
+            }
+            glGenBuffers(1, &streamVbo);
+            glBindBuffer(GL_ARRAY_BUFFER, streamVbo);
+            setupAttributes();
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(streamCapacity), nullptr, GL_STREAM_DRAW);
             streamOffset = 0;
+        } else {
+            glBindBuffer(GL_ARRAY_BUFFER, streamVbo);
         }
 #ifdef __EMSCRIPTEN__
         glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(streamOffset), static_cast<GLsizeiptr>(bytes), vertices.data());
@@ -1132,19 +1164,15 @@ void main()
         }
         resize(width, height);
         glBindFramebuffer(GL_FRAMEBUFFER, framebuffer);
-#ifdef __ANDROID__
-        const GLenum discardAttachments[] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
-        glInvalidateFramebuffer(GL_FRAMEBUFFER, 3, discardAttachments);
-#endif
     }
 
     void GammaPass::resolve(int width, int height, float exponent)
     {
-#ifdef __ANDROID__
-        const GLenum discardAttachments[] = { GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
-        glInvalidateFramebuffer(GL_FRAMEBUFFER, 2, discardAttachments);
-#endif
         glBindFramebuffer(GL_FRAMEBUFFER, 0);
+        glDisable(GL_SCISSOR_TEST);
+        glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+        glDepthMask(GL_TRUE);
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, texture);
         draw(width, height, exponent);
@@ -1324,22 +1352,12 @@ void main()
                 }
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
                 glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fxaaFramebuffer);
-#ifdef __ANDROID__
-                const GLenum fxaaDiscard = GL_COLOR_ATTACHMENT0;
-                glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, 1, &fxaaDiscard);
-#endif
                 glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-#ifdef __ANDROID__
-                const GLenum attachments[4] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT, GL_COLOR_ATTACHMENT1 };
-                glInvalidateFramebuffer(GL_READ_FRAMEBUFFER, occlusionActive ? 4 : 3, attachments);
-#endif
                 glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(target));
-#ifdef __ANDROID__
-                if (target != 0) {
-                    const GLenum targetDiscard[3] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
-                    glInvalidateFramebuffer(GL_FRAMEBUFFER, 3, targetDiscard);
-                }
-#endif
+                glDisable(GL_SCISSOR_TEST);
+                glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+                glDepthMask(GL_TRUE);
+                glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
                 offscreen = false;
                 occlusionActive = false;
                 occlusionCapture = false;
@@ -1347,10 +1365,6 @@ void main()
                 glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
                 glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(target));
                 glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
-#ifdef __ANDROID__
-                const GLenum attachments[4] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT, GL_COLOR_ATTACHMENT1 };
-                glInvalidateFramebuffer(GL_READ_FRAMEBUFFER, occlusionActive ? 4 : 3, attachments);
-#endif
                 glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(target));
                 offscreen = false;
                 occlusionActive = false;
@@ -1620,29 +1634,14 @@ void main()
         glBindFramebuffer(GL_READ_FRAMEBUFFER, sceneFramebuffer);
         glReadBuffer(GL_COLOR_ATTACHMENT1);
         glBindFramebuffer(GL_DRAW_FRAMEBUFFER, resolveFramebuffer);
-#ifdef __ANDROID__
-        const GLenum resolveDiscard[3] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_ATTACHMENT, GL_STENCIL_ATTACHMENT };
-        glInvalidateFramebuffer(GL_DRAW_FRAMEBUFFER, 3, resolveDiscard);
-#endif
         glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT, GL_NEAREST);
-#ifdef __ANDROID__
-        const GLenum maskAttachment = GL_COLOR_ATTACHMENT1;
-        glInvalidateFramebuffer(GL_READ_FRAMEBUFFER, 1, &maskAttachment);
-#endif
         glReadBuffer(GL_COLOR_ATTACHMENT0);
     }
 
     void OcclusionPass::run(const Program& program, uint32_t target, int width, int height, uint32_t texture, bool invalidate)
     {
         glBindFramebuffer(GL_FRAMEBUFFER, target);
-#ifdef __ANDROID__
-        if (invalidate) {
-            const GLenum attachment = GL_COLOR_ATTACHMENT0;
-            glInvalidateFramebuffer(GL_FRAMEBUFFER, 1, &attachment);
-        }
-#else
         static_cast<void>(invalidate);
-#endif
         glViewport(0, 0, width, height);
         glUseProgram(program.id);
         glActiveTexture(GL_TEXTURE0);

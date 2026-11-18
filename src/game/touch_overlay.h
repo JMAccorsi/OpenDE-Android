@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace dx {
     class Canvas2D;
@@ -32,7 +33,16 @@ namespace game {
         Laser,
         AugLight,
         QuickSave,
+        QuickLoad,
+        AugsMenu,
         Count,
+    };
+
+    struct TouchAugEntry {
+        std::string label;
+        uint8_t key = 0;
+        int hotKeyNum = 0;
+        bool active = false;
     };
 
     inline constexpr size_t kTouchControlCount = static_cast<size_t>(TouchControlId::Count);
@@ -56,6 +66,7 @@ namespace game {
         std::function<void(uint8_t key, float value)> onAxis;
         std::function<void(float dx, float dy)> onLookDelta;
         std::function<void()> onQuickRightClick;
+        std::function<uint8_t(float screenX, float screenY)> hitTestHudKey;
     };
 
     class TouchOverlayManager {
@@ -72,6 +83,8 @@ namespace game {
 
         bool isVisible() const { return visible_; }
         bool isEditorOpen() const { return editorOpen_; }
+        bool isAugDrawerOpen() const { return augDrawerOpen_; }
+        void setAugEntries(std::vector<TouchAugEntry> entries) { augEntries_ = std::move(entries); }
         void openEditor();
         void closeEditor(bool saveChanges);
 
@@ -106,6 +119,8 @@ namespace game {
         void releaseTouchStickOnly(const TouchInputCallbacks& cb);
         void setButtonPressed(TouchControlId id, bool pressed, const TouchInputCallbacks& cb);
         void renderGameplayOverlays(dx::Canvas2D& canvas, bool ptBr);
+        void renderAugDrawer(dx::Canvas2D& canvas, bool ptBr);
+        int hitTestAugDrawer(float xNorm, float yNorm, int drawWidth, int drawHeight) const;
         void renderEditor(dx::Canvas2D& canvas, bool ptBr);
         void getToolbarRect(int width, int height, float& outX, float& outY, float& outW, float& outH) const;
         bool handleEditorTouch(const SDL_Event& event, int drawWidth, int drawHeight);
@@ -145,6 +160,16 @@ namespace game {
         uint64_t lookDownTicks_ = 0;
 
         bool crouchToggled_ = false;
+        bool augDrawerOpen_ = false;
+        std::vector<TouchAugEntry> augEntries_;
+
+        bool hasAugTapFinger_ = false;
+        SDL_FingerID augTapFinger_ = 0;
+        uint8_t augTapKey_ = 0;
+
+        bool hasHudTapFinger_ = false;
+        SDL_FingerID hudTapFinger_ = 0;
+        uint8_t hudTapKey_ = 0;
     };
 
 } // namespace game
