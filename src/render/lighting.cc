@@ -410,6 +410,7 @@ namespace dx {
         prepared.location = lightLocation;
         prepared.radius = lightRadius(light);
         prepared.radiusSquared = prepared.radius * prepared.radius;
+        prepared.invRadius = prepared.radius > 0.0f ? (1.0f / prepared.radius) : 0.0f;
         prepared.effect = actor::LightEffect(light);
         prepared.period = actor::LightPeriod(light);
         prepared.phase = actor::LightPhase(light);

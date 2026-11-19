@@ -239,9 +239,10 @@ namespace dx {
             DVec hitNormal;
             int32_t hitNode = -1;
             bool didHit = false;
-            std::vector<DPlane> hulls;
-            std::vector<int32_t> hullNodes;
-            std::vector<int> flags;
+            DPlane hulls[64];
+            int32_t hullNodes[64];
+            int flags[64];
+            size_t hullCount = 0;
             DVec min;
             DVec max;
             DVec localHit;
@@ -291,29 +292,28 @@ namespace dx {
 
             void setupHulls(const BspNode& node)
             {
-                hulls.clear();
-                hullNodes.clear();
-                flags.clear();
+                hullCount = 0;
                 size_t index = static_cast<size_t>(node.collisionBound);
-                while (index < model.leafHulls.size() && model.leafHulls[index] >= 0 && hulls.size() < 64) {
+                while (index < model.leafHulls.size() && model.leafHulls[index] >= 0 && hullCount < 64) {
                     int32_t entry = model.leafHulls[index];
                     int32_t hullNode = entry & ~0x40000000;
                     DPlane hull = plane(hullNode);
                     if (entry & 0x40000000) {
                         hull = { -hull.x, -hull.y, -hull.z, -hull.w };
                     }
-                    hulls.push_back(hull);
-                    hullNodes.push_back(hullNode);
-                    flags.push_back((hull.x < 0 ? 0x01 : hull.x > 0 ? 0x02
-                                                                    : 0)
+                    hulls[hullCount] = hull;
+                    hullNodes[hullCount] = hullNode;
+                    flags[hullCount] = (hull.x < 0 ? 0x01 : hull.x > 0 ? 0x02
+                                                                       : 0)
                         | (hull.y < 0 ? 0x04 : hull.y > 0 ? 0x08
                                                           : 0)
                         | (hull.z < 0 ? 0x10 : hull.z > 0 ? 0x20
-                                                          : 0));
+                                                          : 0);
+                    hullCount++;
                     index++;
                 }
                 float box[6] = {};
-                size_t boxIndex = static_cast<size_t>(node.collisionBound) + hulls.size() + 1;
+                size_t boxIndex = static_cast<size_t>(node.collisionBound) + hullCount + 1;
                 for (size_t i = 0; i < 6 && boxIndex + i < model.leafHulls.size(); i++) {
                     int32_t raw = model.leafHulls[boxIndex + i];
                     std::memcpy(&box[i], &raw, 4);
@@ -349,7 +349,7 @@ namespace dx {
 
             bool clipPrimitive()
             {
-                for (size_t i = 0; i < hulls.size(); i++) {
+                for (size_t i = 0; i < hullCount; i++) {
                     if (!clipTo(hulls[i], hullNodes[i])) {
                         return false;
                     }
@@ -359,7 +359,7 @@ namespace dx {
                         return false;
                     }
                 }
-                for (size_t i = 0; i < hulls.size(); i++) {
+                for (size_t i = 0; i < hullCount; i++) {
                     for (size_t j = 0; j < i; j++) {
                         if (!convolveEdge(i, j, { 1, 0, 0 }, 0x03) || !convolveEdge(i, j, { 0, 1, 0 }, 0x0c) || !convolveEdge(i, j, { 0, 0, 1 }, 0x30)) {
                             return false;
@@ -869,11 +869,80 @@ namespace dx {
     {
         hit = CheckResult();
         hit.location = end;
-        std::vector<CheckResult> hits = multiLineCheck(start, end, extent, source, flags);
-        if (hits.empty()) {
+        bool hasBest = false;
+        CheckResult best;
+        bool hasLevelHit = false;
+        CheckResult levelHit;
+        Vector actorEnd = end;
+        float dilation = 1.0f;
+        bool onlyMovers = false;
+        if (flags & (TRACE_Level | TRACE_LevelGeometry)) {
+            if (bspLineCheck(levelHit, start, end, extent, 0)) {
+                float distance = (levelHit.location - start).size();
+                if (distance > 0) {
+                    dilation = std::min(1.0f, levelHit.time * (distance + 5.0f) / distance);
+                }
+                actorEnd = start + (end - start) * dilation;
+                onlyMovers = levelHit.time < 0.01f;
+                hasLevelHit = true;
+                hasBest = true;
+                best = levelHit;
+            }
+        }
+        if (flags & (TRACE_Pawns | TRACE_Movers | TRACE_Others | TRACE_OnlyProjActor | TRACE_Blocking)) {
+            Vector boxMin { std::min(start.x, actorEnd.x) - extent.x, std::min(start.y, actorEnd.y) - extent.y, std::min(start.z, actorEnd.z) - extent.z };
+            Vector boxMax { std::max(start.x, actorEnd.x) + extent.x, std::max(start.y, actorEnd.y) + extent.y, std::max(start.z, actorEnd.z) + extent.z };
+            for (UObject* other : collisionHash.query(boxMin, boxMax)) {
+                if (!other || other->destroyed || !actor::bCollideActors(other)) {
+                    continue;
+                }
+                if (onlyMovers && !isMover(other)) {
+                    continue;
+                }
+                bool brush = isBrush(other);
+                if (!brush) {
+                    Vector location = actor::Location(other);
+                    float radius = actor::CollisionRadius(other);
+                    float height = actor::CollisionHeight(other);
+                    if (location.x + radius < boxMin.x || location.x - radius > boxMax.x || location.y + radius < boxMin.y || location.y - radius > boxMax.y || location.z + height < boxMin.z || location.z - height > boxMax.z) {
+                        continue;
+                    }
+                }
+                if (!actorCollides(other, source, flags)) {
+                    continue;
+                }
+                float time = 1;
+                Vector normal;
+                bool collided = false;
+                int32_t node = -1;
+                if (brush) {
+                    collided = brushTrace(other, start, actorEnd, extent, time, normal, &node);
+                } else {
+                    collided = cylinderTrace(other, start, actorEnd, extent, time, normal);
+                }
+                if (collided) {
+                    CheckResult candidate;
+                    candidate.actor = other;
+                    candidate.time = time * dilation;
+                    candidate.normal = normal;
+                    candidate.location = start + (actorEnd - start) * time;
+                    candidate.item = node;
+                    if (hasLevelHit && isMover(other) && (candidate.normal - levelHit.normal).sizeSquared() < 1e-6f && (candidate.location - levelHit.location).sizeSquared() < 4.0f) {
+                        Vector direction = (actorEnd - start).normal();
+                        candidate.location = levelHit.location - direction * 2.0f;
+                        candidate.time = (candidate.location - start).size() / (end - start).size();
+                    }
+                    if (!hasBest || candidate.time < best.time) {
+                        hasBest = true;
+                        best = candidate;
+                    }
+                }
+            }
+        }
+        if (!hasBest) {
             return false;
         }
-        hit = hits.front();
+        hit = best;
         return true;
     }
 

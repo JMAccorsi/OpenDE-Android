@@ -232,10 +232,15 @@ namespace dx {
                     return false;
                 }
             }
-            for (size_t i = 0; i < count; i++) {
-                const Vector& a = mesh.verts[base0 + i];
-                const Vector& b = mesh.verts[base1 + i];
-                raw[i] = a + (b - a) * t;
+            if (base0 == base1 || t <= 0.0f) {
+                std::memcpy(raw.data(), mesh.verts.data() + base0, count * sizeof(Vector));
+            } else {
+                const Vector* src0 = mesh.verts.data() + base0;
+                const Vector* src1 = mesh.verts.data() + base1;
+                Vector* dst = raw.data();
+                for (size_t i = 0; i < count; i++) {
+                    dst[i] = src0[i] + (src1[i] - src0[i]) * t;
+                }
             }
             return true;
         }
@@ -264,7 +269,7 @@ namespace dx {
     {
         size_t count = static_cast<size_t>(std::max(frameVerts, 0));
         int32_t vertexNum = std::min(requested, static_cast<int32_t>(count));
-        bool lod = dynamic_cast<const ULodMesh*>(this) != nullptr;
+        bool lod = cast<const ULodMesh>(this) != nullptr;
         bool wasCached = cache.mesh == this && cache.verts.size() == count;
         if (!wasCached) {
             cache.mesh = this;
@@ -324,7 +329,20 @@ namespace dx {
     int32_t UMesh::animatedPose(const MeshAnimState& state, MeshPoseCaches& caches, std::vector<Vector>& positions, int32_t requested) const
     {
         int32_t vertexNum = tweenFrame(state.sequence, state.frame, caches.main, requested);
-        std::vector<Vector> raw = caches.main.verts;
+        bool hasBlend = false;
+        for (int slot = 0; slot < 4; slot++) {
+            Name blend = state.blendSequences[slot];
+            if (!blend.none() && findSequence(blend)) {
+                hasBlend = true;
+                break;
+            }
+        }
+        if (!hasBlend || verts.size() < caches.main.verts.size()) {
+            transformPose(*this, caches.main.verts, positions);
+            return vertexNum;
+        }
+        static thread_local std::vector<Vector> raw;
+        raw.assign(caches.main.verts.begin(), caches.main.verts.end());
         for (int slot = 0; slot < 4; slot++) {
             Name blend = state.blendSequences[slot];
             if (blend.none() || !findSequence(blend) || verts.size() < raw.size()) {
@@ -420,8 +438,10 @@ namespace dx {
     void ULodMesh::lodTriangles(int32_t vertexSubset, bool morph, int32_t nonMorph, const std::vector<float>& alphas, std::vector<MeshTriangle>& result) const
     {
         result.clear();
-        std::vector<int32_t> pool(wedges.size(), -1);
-        std::vector<MeshWedge> resolved(wedges.size());
+        static thread_local std::vector<int32_t> pool;
+        static thread_local std::vector<MeshWedge> resolved;
+        pool.assign(wedges.size(), -1);
+        resolved.resize(wedges.size());
         for (size_t f = 0; f < faces.size(); f++) {
             if (f < faceLevel.size() && faceLevel[f] > vertexSubset) {
                 continue;

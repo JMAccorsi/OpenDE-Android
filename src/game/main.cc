@@ -1,6 +1,7 @@
 #include "audio/audio.h"
 #include "core/config.h"
 #include "core/objects.h"
+#include "core/prof_clock.h"
 #include "core/url.h"
 #include "core/vm.h"
 #include "deusex/deusex.h"
@@ -12,6 +13,7 @@
 #include "engine/savegame.h"
 #include "engine/world.h"
 #include "extension/extension.h"
+#include "game/perf_overlay.h"
 #include "game/touch_overlay.h"
 #include "render/lighting.h"
 #include "render/scene_renderer.h"
@@ -463,6 +465,10 @@ namespace {
                   "Size of menus and the HUD. Auto keeps the whole interface on screen. Larger scales can push long conversations and some menus off the screen.",
                   "Tamanho dos menus e do HUD. Auto mantém toda a interface na tela.",
                   { "Auto", "1x", "2x", "3x", "4x" }, { "Auto", "1x", "2x", "3x", "4x" } },
+                { "DeusEx.MenuChoice_PerformanceHUD", "Performance |&HUD", "HUD de |&Desempenho",
+                  "Shows an on-screen FPS counter, frame time graph, and real-time CPU/GPU render stats.",
+                  "Exibe contador de FPS, gráfico de frame time e estatísticas de CPU/GPU em tempo real na tela.",
+                  { "Off", "Compact", "Full Debug" }, { "Desl.", "Compacto", "Debug Completo" } },
             };
 
             for (const ChoiceTextSpec& spec : specs) {
@@ -565,11 +571,12 @@ namespace {
             addSwitchChoice(screen, next, "MenuChoice_LimitTextureAnimation", "Limit Texture A|&nimation", "Keeps water and fire textures at 60 updates per second. Off matches the original game.", "LimitTextureAnimation", true);
             addEnumChoice(screen, next + 1, "MenuChoice_AmbientOcclusion", "Ambient |&Occlusion", "Adds soft contact shadows under characters and objects. Higher levels are smoother and cost more performance. Off matches the original game.", "AmbientOcclusion", { "Off", "Low", "Medium", "High" }, 0);
             addEnumChoice(screen, next + 2, "MenuChoice_UIScale", "|&UI Scale", "Size of menus and the HUD. Auto keeps the whole interface on screen. Larger scales can push long conversations and some menus off the screen.", "UIScale", { "Auto", "1x", "1.25x", "1.5x", "1.75x", "2x", "2.25x", "2.5x", "2.75x", "3x", "3.5x", "4x" }, 0);
+            addEnumChoice(screen, next + 3, "MenuChoice_PerformanceHUD", "Performance |&HUD", "Shows an on-screen FPS counter, frame time graph, and real-time CPU/GPU render stats.", "PerformanceHUD", { "Off", "Compact", "Full Debug" }, 0);
             dx::UObject* graphicsDefaults = screen->defaultObject;
             int gap = *reinterpret_cast<int32_t*>(graphicsDefaults->propertyAddress(dx::Name("choiceVerticalGap")));
             int sliderRow = *reinterpret_cast<int32_t*>(graphicsDefaults->propertyAddress(dx::Name("choiceStartY"))) + 8 * gap;
             int32_t& clientHeight = *reinterpret_cast<int32_t*>(graphicsDefaults->propertyAddress(dx::Name("ClientHeight")));
-            int extraRows = browser ? 0 : 2;
+            int extraRows = browser ? 1 : 3;
             dx::deusex::spliceMenuBackground(graphicsDefaults, clientHeight, *reinterpret_cast<int32_t*>(graphicsDefaults->propertyAddress(dx::Name("textureRows"))) * 256);
             dx::deusex::spliceMenuBackground(graphicsDefaults, sliderRow, sliderRow + gap);
             dx::deusex::spliceMenuBackground(graphicsDefaults, sliderRow, sliderRow - gap);
@@ -720,6 +727,7 @@ namespace {
             renderer->setOptions(render);
             constexpr float kUIScaleValues[] = { 0.0f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.25f, 2.5f, 2.75f, 3.0f, 3.5f, 4.0f };
             dx::extension::setUIScale(kUIScaleValues[std::clamp(videoSetting("UIScale", 0), 0, 11)]);
+            perfOverlay.setMode(static_cast<game::PerfOverlayMode>(std::clamp(videoSetting("PerformanceHUD", 0), 0, 2)));
             applyTouchOptions();
             if (browser || options.frames >= 0) {
                 return;
@@ -1670,6 +1678,7 @@ namespace {
                 renderer->canvas(),
                 dx::iequals(dx::config::language(), "ptb"),
                 dx::extension::wantsMouse() || dx::extension::isModalOpen());
+            perfOverlay.render(renderer->canvas(), width, height);
             renderer->endFrame();
         }
 
@@ -1737,6 +1746,10 @@ namespace {
                 if (world) {
                     world->profDetail = rest == "1";
                 }
+            } else if (verb == "perfhud") {
+                int modeVal = std::clamp(std::atoi(rest.c_str()), 0, 2);
+                dx::config::system().set(videoSection(), "PerformanceHUD", std::to_string(modeVal));
+                perfOverlay.setMode(static_cast<game::PerfOverlayMode>(modeVal));
             } else if (verb == "state") {
                 dx::UObject* player = world ? world->player() : nullptr;
                 if (player) {
@@ -1896,10 +1909,15 @@ namespace {
             s.actC = st.actCandMs;
             s.actE = st.actEmitMs;
             s.actF = st.actFlushMs;
+            s.ssao = st.ssaoMs;
+            s.fxaa = st.fxaaMs;
             s.ticked = world->profTickedCount;
             s.vmCalls = world->profTickVmCount;
             s.actN = st.actActors;
             s.actB = st.actBatches;
+            s.dc = st.drawCalls;
+            s.tri = st.triangles;
+            s.lmUp = st.lightmapUploads;
             benchSamples.push_back(s);
             if (static_cast<int>(benchSamples.size()) < benchFrames) {
                 return;
@@ -1909,14 +1927,16 @@ namespace {
             std::vector<float> frames;
             frames.reserve(n);
             BenchSample sum {};
-            double ticked = 0, vmCalls = 0, actN = 0, actB = 0;
+            double ticked = 0, vmCalls = 0, actN = 0, actB = 0, dc = 0, tri = 0, lmUp = 0;
             for (const BenchSample& b : benchSamples) {
                 frames.push_back(b.frame);
                 sum.frame += b.frame; sum.tick += b.tick; sum.render += b.render; sum.swap += b.swap;
                 sum.sync += b.sync; sum.actor += b.actor; sum.ai += b.ai;
                 sum.lgt += b.lgt; sum.occ += b.occ; sum.sky += b.sky; sum.bsp += b.bsp;
                 sum.act += b.act; sum.actC += b.actC; sum.actE += b.actE; sum.actF += b.actF;
+                sum.ssao += b.ssao; sum.fxaa += b.fxaa;
                 ticked += b.ticked; vmCalls += b.vmCalls; actN += b.actN; actB += b.actB;
+                dc += b.dc; tri += b.tri; lmUp += b.lmUp;
             }
             std::sort(frames.begin(), frames.end());
             auto pct = [&frames, n](double p) { return static_cast<double>(frames[std::min(n - 1, static_cast<size_t>(p * static_cast<double>(n - 1) + 0.5))]); };
@@ -1924,11 +1944,13 @@ namespace {
             const double mean = static_cast<double>(sum.frame) * inv;
             char line[1024];
             std::snprintf(line, sizeof(line),
-                "label=%s n=%zu fps=%.2f frame[mean=%.2f p50=%.2f p95=%.2f p99=%.2f max=%.2f] tick=%.2f[sync=%.2f actor=%.2f ai=%.2f ticked=%.0f vm=%.0f] render=%.2f[lgt=%.2f occ=%.2f sky=%.2f bsp=%.2f act=%.2f c=%.2f e=%.2f f=%.2f actors=%.1f batches=%.1f] swap=%.2f",
+                "label=%s n=%zu fps=%.2f frame[mean=%.2f p50=%.2f p95=%.2f p99=%.2f max=%.2f] tick=%.2f[sync=%.2f actor=%.2f ai=%.2f ticked=%.0f vm=%.0f] render=%.2f[lgt=%.2f occ=%.2f sky=%.2f bsp=%.2f act=%.2f c=%.2f e=%.2f f=%.2f ssao=%.2f fxaa=%.2f actors=%.1f batches=%.1f dc=%.0f tri=%.0f lmUp=%.1f] swap=%.2f",
                 benchLabel.c_str(), n, 1000.0 / mean, mean, pct(0.50), pct(0.95), pct(0.99), static_cast<double>(frames.back()),
                 static_cast<double>(sum.tick) * inv, static_cast<double>(sum.sync) * inv, static_cast<double>(sum.actor) * inv, static_cast<double>(sum.ai) * inv, ticked * inv, vmCalls * inv,
                 static_cast<double>(sum.render) * inv, static_cast<double>(sum.lgt) * inv, static_cast<double>(sum.occ) * inv, static_cast<double>(sum.sky) * inv, static_cast<double>(sum.bsp) * inv,
-                static_cast<double>(sum.act) * inv, static_cast<double>(sum.actC) * inv, static_cast<double>(sum.actE) * inv, static_cast<double>(sum.actF) * inv, actN * inv, actB * inv,
+                static_cast<double>(sum.act) * inv, static_cast<double>(sum.actC) * inv, static_cast<double>(sum.actE) * inv, static_cast<double>(sum.actF) * inv,
+                static_cast<double>(sum.ssao) * inv, static_cast<double>(sum.fxaa) * inv,
+                actN * inv, actB * inv, dc * inv, tri * inv, lmUp * inv,
                 static_cast<double>(sum.swap) * inv);
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION, "OpenDE_Bench: %s", line);
 #ifdef __ANDROID__
@@ -1984,44 +2006,54 @@ namespace {
 #endif
             }
             viewportTime += static_cast<double>(delta);
-            applyPlayerSpeed();
-            dx::deusex::applyVanillaFixes();
-            applyRenderOptions();
+            static float cachedBrightness = 0.5f;
+            if (gui || frame == 0 || (frame % 30) == 0) {
+                applyPlayerSpeed();
+                dx::deusex::applyVanillaFixes();
+                applyRenderOptions();
+                cachedBrightness = static_cast<float>(std::atof(dx::config::system().get(videoSection(), "Brightness").value_or("0.5").c_str()));
+            }
             const double perfFreqMs = static_cast<double>(SDL_GetPerformanceFrequency()) / 1000.0;
             uint64_t tTick0 = SDL_GetPerformanceCounter();
-            if (world && !touchOverlay.isEditorOpen()) {
-                world->tick(delta);
-            }
-            dx::deusex::flushPendingLocalization(world.get());
-            dx::extension::tick(delta);
-#ifdef __ANDROID__
             {
-                bool wantTextInput = !lastInputWasGamepad && dx::extension::isEditFocused();
-                if (wantTextInput != textInputRequested) {
-                    textInputRequested = wantTextInput;
-                    if (wantTextInput) {
-                        SDL_StartTextInput();
-                    } else {
-                        SDL_StopTextInput();
+                DX_TRACE_SCOPE("DX_Tick");
+                if (world && !touchOverlay.isEditorOpen()) {
+                    world->tick(delta);
+                }
+                dx::deusex::flushPendingLocalization(world.get());
+                dx::extension::tick(delta);
+#ifdef __ANDROID__
+                {
+                    bool wantTextInput = !lastInputWasGamepad && dx::extension::isEditFocused();
+                    if (wantTextInput != textInputRequested) {
+                        textInputRequested = wantTextInput;
+                        if (wantTextInput) {
+                            SDL_StartTextInput();
+                        } else {
+                            SDL_StopTextInput();
+                        }
                     }
                 }
-            }
 #endif
-            dx::UObject* console = scriptConsole();
-            if (console) {
-                dx::vm::Call(console, dx::Name("Tick")).f(delta).run();
-                int height = 0;
-                SDL_GL_GetDrawableSize(window, nullptr, &height);
-                dx::console::ConsoleLines(console) = static_cast<int32_t>(std::min(dx::console::ConsolePos(console) * static_cast<float>(height), static_cast<float>(height)));
+                dx::UObject* console = scriptConsole();
+                if (console) {
+                    dx::vm::Call(console, dx::Name("Tick")).f(delta).run();
+                    int consoleHeight = 0;
+                    SDL_GL_GetDrawableSize(window, nullptr, &consoleHeight);
+                    dx::console::ConsoleLines(console) = static_cast<int32_t>(std::min(dx::console::ConsolePos(console) * static_cast<float>(consoleHeight), static_cast<float>(consoleHeight)));
+                }
+                handleTravel();
             }
-            handleTravel();
             uint64_t tTick1 = SDL_GetPerformanceCounter();
             int width = 0;
             int height = 0;
             SDL_GL_GetDrawableSize(window, &width, &height);
             uint64_t tRender0 = SDL_GetPerformanceCounter();
-            render(width, height);
-            renderer->applyBrightness(static_cast<float>(std::atof(dx::config::system().get(videoSection(), "Brightness").value_or("0.5").c_str())));
+            {
+                DX_TRACE_SCOPE("DX_Render");
+                render(width, height);
+                renderer->applyBrightness(cachedBrightness);
+            }
             uint64_t tRender1 = SDL_GetPerformanceCounter();
             dx::audio::update(viewLocation, viewRotation, delta);
             if (!pendingShot.empty()) {
@@ -2052,19 +2084,53 @@ namespace {
                 running = false;
             }
             uint64_t tSwap0 = SDL_GetPerformanceCounter();
-            SDL_GL_SwapWindow(window);
+            {
+                DX_TRACE_SCOPE("DX_Swap");
+                SDL_GL_SwapWindow(window);
+            }
             uint64_t tSwap1 = SDL_GetPerformanceCounter();
             auto ema = [](float prev, float sample) { return prev <= 0.001f ? sample : (prev * 0.9f + sample * 0.1f); };
             profTickMs = ema(profTickMs, static_cast<float>(static_cast<double>(tTick1 - tTick0) / perfFreqMs));
             profRenderMs = ema(profRenderMs, static_cast<float>(static_cast<double>(tRender1 - tRender0) / perfFreqMs));
             profSwapMs = ema(profSwapMs, static_cast<float>(static_cast<double>(tSwap1 - tSwap0) / perfFreqMs));
+            if (perfOverlay.mode() != game::PerfOverlayMode::Off && perfLastSwap != 0) {
+                const auto& st = renderer->stats();
+                game::PerfOverlaySample ps {};
+                ps.frameMs = static_cast<float>(static_cast<double>(tSwap1 - perfLastSwap) / perfFreqMs);
+                ps.tickMs = profTickMs;
+                ps.renderMs = profRenderMs;
+                ps.swapMs = profSwapMs;
+                ps.tickActorMs = world ? world->profActorMs : 0.0f;
+                ps.tickAiMs = world ? world->profAiMs : 0.0f;
+                ps.tickedActors = world ? world->profTickedCount : 0;
+                ps.lightsMs = st.lightsMs;
+                ps.occludeMs = st.occludeMs;
+                ps.skyMs = st.skyMs;
+                ps.bspMs = st.bspMs;
+                ps.actorsMs = st.actorsMs;
+                ps.actEmitMs = st.actEmitMs;
+                ps.actFlushMs = st.actFlushMs;
+                ps.ssaoMs = st.ssaoMs;
+                ps.fxaaMs = st.fxaaMs;
+                ps.actActors = st.actActors;
+                ps.actBatches = st.actBatches;
+                ps.drawCalls = st.drawCalls;
+                ps.triangles = st.triangles;
+                ps.meshFast = st.meshFast;
+                ps.meshFull = st.meshFull;
+                ps.meshRebuild = st.meshRebuild;
+                ps.width = width;
+                ps.height = height;
+                perfOverlay.pushSample(ps);
+            }
+            perfLastSwap = tSwap1;
             recordBench(perfFreqMs, tTick0, tTick1, tRender0, tRender1, tSwap0, tSwap1);
 #ifdef __ANDROID__
             if ((frame % 120) == 0) {
                 float fps = delta > 0.0001f ? (1.0f / delta) : 0.0f;
                 const auto& st = renderer->stats();
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "OpenDE_Perf: frame=%d fps=%.1f tick=%.2f[s=%.2f a=%.2f ai=%.2f n=%d] render=%.2f (lgt=%.2f occ=%.2f sky=%.2f bsp=%.2f act=%.2f[c=%.2f e=%.2f f=%.2f n=%d b=%d] cor=%.2f) swap=%.2f res=%dx%d",
+                    "OpenDE_Perf: frame=%d fps=%.1f tick=%.2f[s=%.2f a=%.2f ai=%.2f n=%d] render=%.2f (lgt=%.2f occ=%.2f sky=%.2f bsp=%.2f act=%.2f[c=%.2f e=%.2f f=%.2f n=%d b=%d m=%d/%d/%d(g=%d u=%d l=%d)] cor=%.2f ssao=%.2f fxaa=%.2f dc=%d tri=%d lmUp=%d) swap=%.2f res=%dx%d",
                     frame, static_cast<double>(fps),
                     static_cast<double>(profTickMs),
                     static_cast<double>(world ? world->profSyncMs : 0.0f),
@@ -2077,7 +2143,10 @@ namespace {
                     static_cast<double>(st.actorsMs),
                     static_cast<double>(st.actCandMs), static_cast<double>(st.actEmitMs), static_cast<double>(st.actFlushMs),
                     st.actActors, st.actBatches,
+                    st.meshFast, st.meshFull, st.meshRebuild, st.meshRebGeom, st.meshRebUncache, st.meshRebLight,
                     static_cast<double>(st.coronasMs),
+                    static_cast<double>(st.ssaoMs), static_cast<double>(st.fxaaMs),
+                    st.drawCalls, st.triangles, st.lightmapUploads,
                     static_cast<double>(profSwapMs), width, height);
                 if (world && world->profDetail) {
                     SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
@@ -2117,8 +2186,8 @@ namespace {
         std::unique_ptr<dx::World> world;
         dx::UObject* canvasObject = nullptr;
         struct BenchSample {
-            float frame, tick, render, swap, sync, actor, ai, lgt, occ, sky, bsp, act, actC, actE, actF;
-            int ticked, vmCalls, actN, actB;
+            float frame, tick, render, swap, sync, actor, ai, lgt, occ, sky, bsp, act, actC, actE, actF, ssao, fxaa;
+            int ticked, vmCalls, actN, actB, dc, tri, lmUp;
         };
         int benchWarmup = -1;
         long long lastDebugCmdStamp = 0;
@@ -2157,6 +2226,8 @@ namespace {
         bool textInputRequested = false;
         bool lastInputWasGamepad = false;
         game::TouchOverlayManager touchOverlay;
+        game::PerfOverlay perfOverlay;
+        uint64_t perfLastSwap = 0;
         dx::UClass* touchEditorChoiceClass = nullptr;
         float appliedPlayerSpeed = 1.0f;
         int appliedVSync = -1;

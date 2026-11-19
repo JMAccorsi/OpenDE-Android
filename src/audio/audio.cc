@@ -195,6 +195,9 @@ namespace dx::audio {
             float oggFadeSpeed = 0;
             bool oggRequested = false;
             SoundModifier modifier;
+            std::unordered_set<UObject*> presentActors;
+            uint64_t presentVersion = ~0ull;
+            ULevel* presentLevel = nullptr;
         };
 
         State& state()
@@ -1189,6 +1192,9 @@ namespace dx::audio {
         s.ear = {};
         s.sounds.clear();
         s.modules.clear();
+        s.presentActors.clear();
+        s.presentVersion = ~0ull;
+        s.presentLevel = nullptr;
     }
 
     void render(float* stereo, size_t frames)
@@ -1212,7 +1218,6 @@ namespace dx::audio {
         World* world = World::current;
         applyMusicRequest(world);
         UObject* zone = nullptr;
-        std::unordered_set<UObject*> present;
         if (world) {
             UObject* player = world->player();
             if (player && !player->destroyed && player->data) {
@@ -1227,14 +1232,23 @@ namespace dx::audio {
                 }
                 zone = region(view).zone;
             }
-            present.insert(world->actors.begin(), world->actors.end());
-            if (s.oggOwner && !present.count(s.oggOwner)) {
+            if (s.presentVersion != world->actorsVersion || s.presentLevel != world->level) {
+                s.presentActors.clear();
+                s.presentActors.reserve(world->actors.size());
+                s.presentActors.insert(world->actors.begin(), world->actors.end());
+                s.presentVersion = world->actorsVersion;
+                s.presentLevel = world->level;
+            }
+            if (s.oggOwner && !s.presentActors.count(s.oggOwner)) {
                 std::lock_guard<std::mutex> lock(s.mutex);
                 stopOgg(s);
             }
             bool realtime = !world->levelInfo || !world->levelInfo->data || levelinfo::Pauser(world->levelInfo).empty();
             updateAmbient(s, world, realtime);
         } else {
+            s.presentActors.clear();
+            s.presentVersion = ~0ull;
+            s.presentLevel = nullptr;
             std::lock_guard<std::mutex> lock(s.mutex);
             for (Voice& voice : s.voices) {
                 if (voice.ambient) {
@@ -1248,7 +1262,7 @@ namespace dx::audio {
             if (!alive(voice)) {
                 continue;
             }
-            bool live = voice.actor && present.count(voice.actor) && !voice.actor->destroyed && voice.actor->data;
+            bool live = voice.actor && s.presentActors.count(voice.actor) && !voice.actor->destroyed && voice.actor->data;
             if (live) {
                 voice.location = actor::Location(voice.actor);
             }

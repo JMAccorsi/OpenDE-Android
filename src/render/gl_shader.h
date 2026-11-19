@@ -9,10 +9,16 @@
 namespace dx {
     class UberShader {
     public:
+        static constexpr size_t StreamRingCount = 3;
+
         UberShader();
         ~UberShader();
         UberShader(const UberShader&) = delete;
         UberShader& operator=(const UberShader&) = delete;
+
+        void nextFrame();
+        int32_t drawCalls() const { return frameDrawCalls; }
+        int32_t triangles() const { return frameTriangles; }
 
         void use();
         void setViewProj(const Mat4& matrix);
@@ -31,6 +37,8 @@ namespace dx {
         void bindLightmap(uint32_t texture);
         void draw(const std::vector<GLVertex>& vertices, uint32_t primitive);
         void upload(const std::vector<GLVertex>& vertices);
+        GLVertex* beginUpload(size_t vertexCount);
+        void endUpload();
         void drawRange(int32_t first, int32_t count, uint32_t primitive = 0x0004 /* GL_TRIANGLES */);
         void bindStatic(uint32_t vao);
         void drawStatic(uint32_t vao, int32_t first, int32_t count);
@@ -101,11 +109,17 @@ namespace dx {
         bool blendInitialized = false;
         bool hasViewProj = false;
         bool hasEye = false;
-        uint32_t streamVao = 0;
-        uint32_t streamVbo = 0;
-        size_t streamCapacity = 0;
+        uint32_t streamVaos[StreamRingCount] = {};
+        uint32_t streamVbos[StreamRingCount] = {};
+        size_t streamCapacities[StreamRingCount] = {};
+        uint32_t streamEbos[StreamRingCount] = {};
+        size_t streamEboCapacities[StreamRingCount] = {};
+        size_t streamRingIndex = 0;
         size_t streamOffset = 0;
+        size_t streamEboOffset = 0;
         int32_t uploadBase = 0;
+        int32_t frameDrawCalls = 0;
+        int32_t frameTriangles = 0;
         bool hardwareClip = false;
     };
 
@@ -149,6 +163,7 @@ namespace dx {
         uint32_t sceneFramebuffer() const;
         uint32_t sceneDepth() const;
         uint32_t sceneMask() const;
+        uint32_t resolveColorForOcclusion(int width, int height);
         void beginOcclusion();
         void endOcclusion();
         void setBlendWritesMask(bool enabled);
@@ -157,6 +172,7 @@ namespace dx {
         void clearMask();
 
     private:
+        void prepareColorResolve(int width, int height);
         void releaseTextures();
         void releaseMask();
 
@@ -186,6 +202,8 @@ namespace dx {
         bool blendWritesMask = false;
         bool maskClean = false;
         bool maskWrites = false;
+        bool colorResolved = false;
+        bool fxaaTextureAttached = false;
     };
 
     class OcclusionPass {
@@ -195,7 +213,7 @@ namespace dx {
         OcclusionPass(const OcclusionPass&) = delete;
         OcclusionPass& operator=(const OcclusionPass&) = delete;
 
-        void apply(uint32_t sceneFramebuffer, uint32_t sceneDepth, uint32_t sceneMask, int width, int height, OcclusionQuality quality, float nearPlane, float farPlane, float tanHalfWidth, float tanHalfHeight, bool colorMaskiSupported);
+        void apply(uint32_t sceneFramebuffer, uint32_t sceneDepth, uint32_t sceneMask, uint32_t resolveColorFbo, int width, int height, OcclusionQuality quality, float nearPlane, float farPlane, float tanHalfWidth, float tanHalfHeight, bool colorMaskiSupported);
         void release();
 
     private:

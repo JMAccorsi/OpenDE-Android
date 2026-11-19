@@ -152,10 +152,20 @@ namespace game {
                 const uint8_t* rows = lookupGlyph(text[i]);
                 for (int r = 0; r < 7; ++r) {
                     uint8_t bits = rows[r];
-                    for (int c = 0; c < 5; ++c) {
-                        if (bits & (1u << (4 - c))) {
-                            canvas.drawRect(x + static_cast<float>(c) * step, y + static_cast<float>(r) * step, step, step, color, dx::BlendStyle::Normal);
+                    if (!bits) {
+                        continue;
+                    }
+                    int c = 0;
+                    while (c < 5) {
+                        if (!(bits & (1u << (4 - c)))) {
+                            ++c;
+                            continue;
                         }
+                        int start = c;
+                        while (c < 5 && (bits & (1u << (4 - c)))) {
+                            ++c;
+                        }
+                        canvas.drawRect(x + static_cast<float>(start) * step, y + static_cast<float>(r) * step, static_cast<float>(c - start) * step, step, color, dx::BlendStyle::Normal);
                     }
                 }
                 x += charW + gap;
@@ -167,7 +177,7 @@ namespace game {
             if (radius <= 1.0f || color.a <= 0.005f) {
                 return;
             }
-            constexpr int kSlices = 28;
+            constexpr int kSlices = 14;
             const float r2 = radius * radius;
             float prevY = -radius;
             for (int i = -kSlices + 1; i <= kSlices; ++i) {
@@ -880,6 +890,14 @@ namespace game {
         const float fh = static_cast<float>(h);
         const float alpha = std::clamp(settings_.opacity, 0.15f, 0.95f);
 
+        // Pass 1: All triangle-based geometry (filled circles + bitmap text) -> 1 GL draw call.
+        float stickKx = 0.0f;
+        float stickKy = 0.0f;
+        float stickR = 0.0f;
+        float stickCx = 0.0f;
+        float stickCy = 0.0f;
+        bool drawStick = false;
+
         for (size_t i = 0; i < kTouchControlCount; ++i) {
             if (!layouts_[i].enabled) {
                 continue;
@@ -890,18 +908,16 @@ namespace game {
             float r = controlRadiusPx(id, h);
 
             if (id == TouchControlId::MoveStick) {
+                drawStick = true;
+                stickCx = cx;
+                stickCy = cy;
+                stickR = r;
                 dx::LinearColor baseFill { 0.04f, 0.09f, 0.14f, alpha * 0.42f };
-                dx::LinearColor ringCol { 0.35f, 0.80f, 0.98f, alpha * 0.85f };
                 dx::LinearColor knobFill { 0.35f, 0.85f, 1.00f, alpha * (hasStickFinger_ ? 0.85f : 0.55f) };
-                dx::LinearColor knobRing { 0.85f, 0.96f, 1.00f, alpha * 0.95f };
                 drawFilledCircle(canvas, cx, cy, r, baseFill);
-                drawCircleOutline(canvas, cx, cy, r, 2.5f, ringCol);
-                // Crosshair notches on stick base
-                canvas.drawLine(cx - r * 0.25f, cy, cx + r * 0.25f, cy, { 0.35f, 0.80f, 0.98f, alpha * 0.40f });
-                canvas.drawLine(cx, cy - r * 0.25f, cx, cy + r * 0.25f, { 0.35f, 0.80f, 0.98f, alpha * 0.40f });
 
-                float kx = cx;
-                float ky = cy;
+                stickKx = cx;
+                stickKy = cy;
                 if (hasStickFinger_) {
                     float maxOff = r * 0.62f;
                     float ox = (stickCurX_ - stickOriginX_) * fw;
@@ -911,11 +927,10 @@ namespace game {
                         ox = (ox / dist) * maxOff;
                         oy = (oy / dist) * maxOff;
                     }
-                    kx += ox;
-                    ky += oy;
+                    stickKx += ox;
+                    stickKy += oy;
                 }
-                drawFilledCircle(canvas, kx, ky, r * 0.36f, knobFill);
-                drawCircleOutline(canvas, kx, ky, r * 0.36f, 2.0f, knobRing);
+                drawFilledCircle(canvas, stickKx, stickKy, r * 0.36f, knobFill);
                 continue;
             }
 
@@ -925,6 +940,45 @@ namespace game {
             dx::LinearColor fill = pressed
                 ? dx::LinearColor { 0.12f, 0.42f, 0.56f, std::min(0.95f, alpha * 1.15f) }
                 : dx::LinearColor { 0.04f, 0.09f, 0.14f, alpha * 0.62f };
+            dx::LinearColor fg = pressed
+                ? dx::LinearColor { 1.00f, 1.00f, 1.00f, 1.00f }
+                : dx::LinearColor { 0.86f, 0.95f, 1.00f, std::min(1.00f, alpha + 0.38f) };
+
+            drawFilledCircle(canvas, cx, cy, r, fill);
+
+            float textScale = std::max(2.0f, r * 0.085f);
+            float textY = (id == TouchControlId::Fire || id == TouchControlId::Jump || id == TouchControlId::Crouch ||
+                           id == TouchControlId::Scope || id == TouchControlId::Menu)
+                ? (cy + r * 0.22f)
+                : cy;
+            drawText(canvas, controlLabel(id, ptBr), cx, textY, textScale, fg, r * 1.62f);
+        }
+
+        // Pass 2: All line-based geometry (circle outlines + stick notches + icon accents) -> 1 GL draw call.
+        if (drawStick) {
+            dx::LinearColor ringCol { 0.35f, 0.80f, 0.98f, alpha * 0.85f };
+            dx::LinearColor knobRing { 0.85f, 0.96f, 1.00f, alpha * 0.95f };
+            drawCircleOutline(canvas, stickCx, stickCy, stickR, 2.5f, ringCol);
+            canvas.drawLine(stickCx - stickR * 0.25f, stickCy, stickCx + stickR * 0.25f, stickCy, { 0.35f, 0.80f, 0.98f, alpha * 0.40f });
+            canvas.drawLine(stickCx, stickCy - stickR * 0.25f, stickCx, stickCy + stickR * 0.25f, { 0.35f, 0.80f, 0.98f, alpha * 0.40f });
+            drawCircleOutline(canvas, stickKx, stickKy, stickR * 0.36f, 2.0f, knobRing);
+        }
+
+        for (size_t i = 0; i < kTouchControlCount; ++i) {
+            if (!layouts_[i].enabled) {
+                continue;
+            }
+            TouchControlId id = static_cast<TouchControlId>(i);
+            if (id == TouchControlId::MoveStick) {
+                continue;
+            }
+            float cx = layouts_[i].cx * fw;
+            float cy = layouts_[i].cy * fh;
+            float r = controlRadiusPx(id, h);
+
+            const bool pressed = buttons_[i].active
+                || (id == TouchControlId::Crouch && crouchToggled_)
+                || (id == TouchControlId::AugsMenu && augDrawerOpen_);
             dx::LinearColor rim = pressed
                 ? dx::LinearColor { 0.72f, 0.96f, 1.00f, 0.96f }
                 : dx::LinearColor { 0.36f, 0.82f, 0.98f, std::min(0.95f, alpha + 0.25f) };
@@ -936,16 +990,8 @@ namespace game {
                 rim = pressed ? dx::LinearColor { 1.00f, 0.88f, 0.62f, 0.98f } : dx::LinearColor { 0.96f, 0.58f, 0.28f, std::min(0.95f, alpha + 0.28f) };
             }
 
-            drawFilledCircle(canvas, cx, cy, r, fill);
             drawCircleOutline(canvas, cx, cy, r, pressed ? 3.0f : 2.0f, rim);
             drawIconAccent(canvas, id, cx, cy, r, fg);
-
-            float textScale = std::max(2.0f, r * 0.085f);
-            float textY = (id == TouchControlId::Fire || id == TouchControlId::Jump || id == TouchControlId::Crouch ||
-                           id == TouchControlId::Scope || id == TouchControlId::Menu)
-                ? (cy + r * 0.22f)
-                : cy;
-            drawText(canvas, controlLabel(id, ptBr), cx, textY, textScale, fg, r * 1.62f);
         }
 
         if (augDrawerOpen_) {

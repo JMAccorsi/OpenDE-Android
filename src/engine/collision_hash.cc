@@ -16,7 +16,7 @@ namespace dx {
 
         bool brushBounds(UObject* actor, Vector& min, Vector& max)
         {
-            UModel* model = dynamic_cast<UModel*>(actor::Brush(actor));
+            UModel* model = cast<UModel>(actor::Brush(actor));
             if (!model || !model->bounds.valid) {
                 return false;
             }
@@ -141,14 +141,14 @@ namespace dx {
         insert(slot);
     }
 
-    void CollisionHash::update(UObject* actor)
+    int32_t CollisionHash::updateSlot(UObject* actor)
     {
         if (!actor) {
-            return;
+            return -1;
         }
         if (actor->destroyed || !actor->data || !actor::bCollideActors(actor)) {
             remove(actor);
-            return;
+            return -1;
         }
         uint32_t slot = 0;
         auto it = slots.find(actor);
@@ -177,12 +177,18 @@ namespace dx {
             } else {
                 place(slot, {}, {}, false);
             }
-            return;
+            return static_cast<int32_t>(slot);
         }
         Vector location = actor::Location(actor);
         float radius = actor::CollisionRadius(actor);
         float height = actor::CollisionHeight(actor);
         place(slot, { location.x - radius, location.y - radius, location.z - height }, { location.x + radius, location.y + radius, location.z + height }, true);
+        return static_cast<int32_t>(slot);
+    }
+
+    void CollisionHash::update(UObject* actor)
+    {
+        updateSlot(actor);
     }
 
     void CollisionHash::remove(UObject* actor)
@@ -208,11 +214,10 @@ namespace dx {
             if (!actor) {
                 continue;
             }
-            update(actor);
-            auto it = slots.find(actor);
-            if (it != slots.end()) {
-                entries[it->second].order = i;
-                entries[it->second].seen = syncStamp;
+            int32_t slot = updateSlot(actor);
+            if (slot >= 0) {
+                entries[static_cast<size_t>(slot)].order = i;
+                entries[static_cast<size_t>(slot)].seen = syncStamp;
             }
         }
         if (!skipStatic && firstDynamic > 0 && firstDynamic <= actors.size()) {

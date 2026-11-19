@@ -33,6 +33,7 @@ namespace dx {
         Vector location;
         float radius = 0;
         float radiusSquared = 0;
+        float invRadius = 0;
         uint8_t effect = 0;
         uint8_t period = 0;
         uint8_t phase = 0;

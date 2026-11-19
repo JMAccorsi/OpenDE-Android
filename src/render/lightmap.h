@@ -54,6 +54,11 @@ namespace dx {
             UObject* light = nullptr;
             bool moving = false;
             bool cached = false;
+            bool lastEvalValid = false;
+            bool lastOn = false;
+            uint8_t lastEffect = 0;
+            uint8_t lastRadius = 0;
+            Vector lastColor {};
             LightmapClip clip;
             std::vector<uint8_t> source;
             std::vector<uint8_t> illumination;

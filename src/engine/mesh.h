@@ -111,6 +111,7 @@ namespace dx {
         int32_t curPoly = 0;
         int32_t curVertex = 0;
         std::vector<float> textureLod;
+        mutable float cachedBoundRadius = -1.0f;
     };
 
     class ULodMesh : public UMesh {

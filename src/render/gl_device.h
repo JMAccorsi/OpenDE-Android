@@ -58,6 +58,8 @@ namespace dx {
 
         void draw(const std::vector<GLVertex>& vertices, Primitive primitive) override;
         void upload(const std::vector<GLVertex>& vertices) override;
+        GLVertex* beginUpload(size_t vertexCount) override;
+        void endUpload() override;
         void drawRange(int32_t first, int32_t count) override;
         uint32_t createStatic(const std::vector<GLVertex>& vertices) override;
         void deleteStatic(uint32_t geometry) override;
@@ -85,6 +87,7 @@ namespace dx {
         Canvas2D& canvas() override;
         void beginCanvas(int width, int height) override;
         void flushCanvas() override;
+        void frameCounters(int32_t& drawCalls, int32_t& triangles, int32_t& lightmapUploads) const override;
 
     private:
         std::unique_ptr<UberShader> shader;
@@ -97,6 +100,7 @@ namespace dx {
         int sceneWidth = 0;
         OcclusionQuality occlusionQuality = OcclusionQuality::Off;
         int sceneHeight = 0;
+        int32_t lightmapUploadsCount = 0;
         bool gammaTargetBound = false;
     };
 }

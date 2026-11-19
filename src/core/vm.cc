@@ -235,13 +235,41 @@ namespace dx {
     namespace {
         inline void copyStepProperty(UProperty* property, void* result, uint8_t* address, bool copyArray)
         {
-            if (!result) {
+            if (!result || result == address) {
                 return;
             }
-            if (copyArray) {
-                property->copyAll(static_cast<uint8_t*>(result), address);
-            } else {
+            if (!copyArray) {
+                switch (property->type) {
+                case PropType::Byte:
+                    *static_cast<uint8_t*>(result) = *address;
+                    return;
+                case PropType::Int:
+                case PropType::Bool:
+                case PropType::Float:
+                case PropType::Name:
+                    std::memcpy(result, address, 4);
+                    return;
+                case PropType::Object:
+                case PropType::Class:
+                case PropType::Pointer:
+                    std::memcpy(result, address, sizeof(void*));
+                    return;
+                case PropType::Struct:
+                    if (property->structType && property->structType->constructed.empty()) {
+                        std::memcpy(result, address, property->structType->size);
+                        return;
+                    }
+                    break;
+                case PropType::Str:
+                case PropType::String:
+                case PropType::Array:
+                case PropType::Map:
+                case PropType::FixedArray:
+                    break;
+                }
                 property->copy(static_cast<uint8_t*>(result), address);
+            } else {
+                property->copyAll(static_cast<uint8_t*>(result), address);
             }
         }
     }
@@ -599,28 +627,61 @@ namespace dx {
         case 0x32:
         case 0x33: {
             UStruct* structType = cast<UStruct>(readObject());
-            std::vector<uint8_t> a(structType->size + 16);
-            std::vector<uint8_t> b(structType->size + 16);
-            structType->initValue(a.data());
-            structType->initValue(b.data());
-            step(object, a.data());
-            step(object, b.data());
-            bool equal = structType->equalsValue(a.data(), b.data());
-            structType->destroyValue(a.data());
-            structType->destroyValue(b.data());
+            const size_t needed = structType->size + 16;
+            alignas(16) uint8_t inlineA[128];
+            alignas(16) uint8_t inlineB[128];
+            std::unique_ptr<uint8_t[]> heapA;
+            std::unique_ptr<uint8_t[]> heapB;
+            uint8_t* aPtr = inlineA;
+            uint8_t* bPtr = inlineB;
+            if (needed > sizeof(inlineA)) {
+                heapA.reset(new uint8_t[needed]);
+                heapB.reset(new uint8_t[needed]);
+                aPtr = heapA.get();
+                bPtr = heapB.get();
+            }
+            const bool trivial = structType->constructed.empty();
+            if (trivial) {
+                std::memset(aPtr, 0, structType->size);
+                std::memset(bPtr, 0, structType->size);
+            } else {
+                structType->initValue(aPtr);
+                structType->initValue(bPtr);
+            }
+            step(object, aPtr);
+            step(object, bPtr);
+            bool equal = structType->equalsValue(aPtr, bPtr);
+            if (!trivial) {
+                structType->destroyValue(aPtr);
+                structType->destroyValue(bPtr);
+            }
             vm::retBool(result, token == 0x32 ? equal : !equal);
             return;
         }
         case 0x36: {
             UProperty* member = cast<UProperty>(readObject());
             UStruct* structType = cast<UStruct>(member->outer);
-            std::vector<uint8_t> buffer(structType->size + 16);
-            structType->initValue(buffer.data());
+            const size_t needed = structType->size + 16;
+            alignas(16) uint8_t inlineBuf[128];
+            std::unique_ptr<uint8_t[]> heapBuf;
+            uint8_t* bufPtr = inlineBuf;
+            if (needed > sizeof(inlineBuf)) {
+                heapBuf.reset(new uint8_t[needed]);
+                bufPtr = heapBuf.get();
+            }
+            const bool trivial = structType->constructed.empty();
+            if (trivial) {
+                std::memset(bufPtr, 0, structType->size);
+            } else {
+                structType->initValue(bufPtr);
+            }
             propAddr = nullptr;
-            step(context, buffer.data());
+            step(context, bufPtr);
             uint8_t* address = propAddr ? propAddr + member->offset : nullptr;
-            copyStepProperty(member, result, buffer.data() + member->offset, copyArray);
-            structType->destroyValue(buffer.data());
+            copyStepProperty(member, result, bufPtr + member->offset, copyArray);
+            if (!trivial) {
+                structType->destroyValue(bufPtr);
+            }
             propAddr = address;
             prop = member;
             return;
@@ -980,8 +1041,10 @@ namespace dx {
                 callNative(stack, context, function, function->native, result);
                 return;
             }
-            objects::ensureLoaded(function);
-            function->link();
+            if (!function->linked) {
+                objects::ensureLoaded(function);
+                function->link();
+            }
 
             NativeRegistry& registry = natives();
             if (registry.depth > 250) {
@@ -1001,7 +1064,11 @@ namespace dx {
                 heapLocals.reset(new uint8_t[needed]);
                 localsPtr = heapLocals.get();
             }
-            function->initValue(localsPtr);
+            if (function->constructed.empty()) {
+                std::memset(localsPtr, 0, function->size);
+            } else {
+                function->initValue(localsPtr);
+            }
 
             struct OutParm {
                 uint8_t* address;
@@ -1039,7 +1106,7 @@ namespace dx {
 
             traceCall("call", context, function);
             uint32_t singular = function->functionFlags & FUNC_Singular;
-            if (context && isProbing(context, function->name) && !(singular && context->singular)) {
+            if (context && (!context->stateFrame || isProbing(context, function->name)) && !(singular && context->singular)) {
                 Frame frame;
                 frame.object = context;
                 frame.node = function;
@@ -1077,7 +1144,9 @@ namespace dx {
             if (result && function->returnParm) {
                 function->returnParm->copyAll(static_cast<uint8_t*>(result), localsPtr + function->returnParm->offset);
             }
-            function->destroyValue(localsPtr);
+            if (!function->constructed.empty()) {
+                function->destroyValue(localsPtr);
+            }
         }
 
         int32_t probeIndex(Name eventName)
@@ -1367,32 +1436,32 @@ namespace dx {
                 function = nullptr;
                 return;
             }
-            objects::ensureLoaded(callee);
-            if (skipNoopCalls && !(callee->functionFlags & FUNC_Native) && !callee->returnParm) {
-                const auto& sc = callee->script;
-                if (sc.empty() ||
-                    (sc.size() == 1 && (sc[0] == 0x53 || sc[0] == 0x04)) ||
-                    (sc.size() == 2 && sc[0] == 0x04 && sc[1] == EX_Nothing) ||
-                    (sc.size() == 3 && sc[0] == 0x04 && sc[1] == EX_Nothing && sc[2] == 0x53)) {
-                    function = nullptr;
-                    return;
-                }
+            if (!callee->linked) {
+                objects::ensureLoaded(callee);
+                callee->link();
             }
-            callee->link();
+            if (skipNoopCalls && callee->isNoop && !callee->scriptOverride) {
+                function = nullptr;
+                return;
+            }
             size_t needed = callee->size + 16;
             if (needed <= InlineBufferSize) {
-                std::memset(inlineBuffer, 0, needed);
                 bufferPtr = inlineBuffer;
             } else {
-                heapBuffer.assign(needed, 0);
+                heapBuffer.resize(needed);
                 bufferPtr = heapBuffer.data();
             }
-            callee->initValue(bufferPtr);
+            if (callee->constructed.empty()) {
+                std::memset(bufferPtr, 0, needed);
+            } else {
+                callee->initValue(bufferPtr);
+                std::memset(bufferPtr + callee->size, 0, 16);
+            }
         }
 
         Call::~Call()
         {
-            if (function && bufferPtr) {
+            if (function && bufferPtr && !function->constructed.empty()) {
                 function->destroyValue(bufferPtr);
             }
         }

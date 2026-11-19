@@ -183,15 +183,16 @@ namespace dx {
         float texWidth = 1;
         float texHeight = 1;
         bool masked = false;
-        UTexture* frame = textures.animated(texture);
-        const GLTextureInfo* info = style == BlendStyle::Masked ? textures.getMasked(frame) : textures.get(frame);
-        if (info) {
+        if (texture) {
+            UTexture* frame = textures.animated(texture);
+            const GLTextureInfo* info = style == BlendStyle::Masked ? textures.getMasked(frame) : textures.get(frame);
+            if (!info) {
+                return;
+            }
             id = info->id;
             texWidth = static_cast<float>(info->width);
             texHeight = static_cast<float>(info->height);
             masked = info->masked;
-        } else if (texture) {
-            return;
         }
         prepare(id, style, masked, smooth, GL_TRIANGLES);
         if (style == BlendStyle::Modulated) {
@@ -216,10 +217,15 @@ namespace dx {
             corners[i].b = color.b;
             corners[i].a = color.a;
         }
-        const int order[6] = { 0, 1, 2, 0, 2, 3 };
-        for (int index : order) {
-            vertices.push_back(corners[index]);
-        }
+        const size_t base = vertices.size();
+        vertices.resize(base + 6);
+        GLVertex* out = vertices.data() + base;
+        out[0] = corners[0];
+        out[1] = corners[1];
+        out[2] = corners[2];
+        out[3] = corners[0];
+        out[4] = corners[2];
+        out[5] = corners[3];
         batches.back().count += 6;
     }
 

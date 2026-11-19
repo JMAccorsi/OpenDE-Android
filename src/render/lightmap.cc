@@ -282,10 +282,16 @@ namespace dx {
     {
         bytes = lighting.base;
         for (SurfaceLighting::Light& entry : lighting.lights) {
-            if (!lightOnSurfaces(entry.light)) {
+            bool on = lightOnSurfaces(entry.light);
+            entry.lastEvalValid = true;
+            entry.lastOn = on;
+            if (!on) {
                 continue;
             }
             uint8_t effect = actor::LightEffect(entry.light);
+            entry.lastEffect = effect;
+            entry.lastRadius = actor::LightRadius(entry.light);
+            entry.lastColor = lightColor(entry.light, time);
             bool spatial = entry.moving || (lightEffectSpatialDynamic(effect) && effect != LE_CloudCast);
             if (spatial || !entry.cached) {
                 illuminate(model, surf, lighting, entry.light, entry.source, time, entry.clip, entry.illumination);
@@ -478,6 +484,31 @@ namespace dx {
                 continue;
             }
             entry.frame = frame;
+            bool needsEval = false;
+            for (const SurfaceLighting::Light& lightEntry : entry.lighting.lights) {
+                bool on = lightOnSurfaces(lightEntry.light);
+                if (!lightEntry.lastEvalValid || on != lightEntry.lastOn) {
+                    needsEval = true;
+                    break;
+                }
+                if (!on) {
+                    continue;
+                }
+                uint8_t effect = actor::LightEffect(lightEntry.light);
+                if (lightEntry.moving || (lightEffectSpatialDynamic(effect) && effect != LE_CloudCast) || lightEffectMergeDynamic(effect)) {
+                    needsEval = true;
+                    break;
+                }
+                uint8_t radius = actor::LightRadius(lightEntry.light);
+                Vector col = lightColor(lightEntry.light, time);
+                if (effect != lightEntry.lastEffect || radius != lightEntry.lastRadius || col.x != lightEntry.lastColor.x || col.y != lightEntry.lastColor.y || col.z != lightEntry.lastColor.z) {
+                    needsEval = true;
+                    break;
+                }
+            }
+            if (!needsEval) {
+                continue;
+            }
             evaluateSurfaceLighting(entry.lighting, model, model->surfs[entry.surf], time, bytes);
             if (bytes == entry.bytes) {
                 continue;

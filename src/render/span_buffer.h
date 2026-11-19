@@ -25,14 +25,13 @@ namespace dx {
         void occlude(const ScreenPoint* points, int32_t count);
 
     private:
-        struct Interval {
-            int32_t x0 = 0;
-            int32_t x1 = 0;
-        };
-
         void cover(int32_t y, int32_t x0, int32_t x1);
+        bool rangeHasOpen(const uint64_t* rowBits, int32_t x0, int32_t x1) const;
 
-        std::vector<std::vector<Interval>> rows;
+        std::vector<uint64_t> bits;
+        std::vector<uint8_t> rowOpen;
+        int32_t rowCount = 0;
+        int32_t wordsPerRow = 0;
         int32_t columns = 0;
         int32_t openRows = 0;
     };

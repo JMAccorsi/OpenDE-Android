@@ -94,6 +94,7 @@ namespace dx {
 
         bool isA(const UClass* other) const;
         bool isA(Name className) const;
+        inline bool hasClassBit(uint32_t bit) const;
         std::string fullName() const;
         std::string pathName() const;
         UObject* outermost();
@@ -203,6 +204,59 @@ namespace dx {
         NativeFunction native = nullptr;
         NativeFunction scriptOverride = nullptr;
         std::vector<uint8_t> stub;
+        bool isNoop = false;
+    };
+
+    struct FlatFuncTable {
+        struct Slot {
+            uint32_t key = 0xFFFFFFFFu;
+            UFunction* value = nullptr;
+        };
+        std::vector<Slot> slots;
+        uint32_t mask = 0;
+
+        void build(const std::unordered_map<Name, UFunction*>& map)
+        {
+            slots.clear();
+            mask = 0;
+            if (map.empty()) {
+                return;
+            }
+            size_t cap = 8;
+            while (cap < map.size() * 2) {
+                cap <<= 1;
+            }
+            slots.assign(cap, Slot {});
+            mask = static_cast<uint32_t>(cap - 1);
+            for (const auto& kv : map) {
+                const uint32_t key = kv.first.index();
+                uint32_t idx = (key * 2654435761u) & mask;
+                while (slots[idx].key != 0xFFFFFFFFu) {
+                    idx = (idx + 1u) & mask;
+                }
+                slots[idx].key = key;
+                slots[idx].value = kv.second;
+            }
+        }
+
+        UFunction* find(Name functionName) const
+        {
+            if (slots.empty()) {
+                return nullptr;
+            }
+            const uint32_t key = functionName.index();
+            uint32_t idx = (key * 2654435761u) & mask;
+            while (true) {
+                const Slot& s = slots[idx];
+                if (s.key == key) {
+                    return s.value;
+                }
+                if (s.key == 0xFFFFFFFFu) {
+                    return nullptr;
+                }
+                idx = (idx + 1u) & mask;
+            }
+        }
     };
 
     class UState : public UStruct {
@@ -210,13 +264,15 @@ namespace dx {
         UState() { typeBits |= OBJ_State; }
         void serialize(Reader& reader, Linker& linker) override;
         void linkState();
-        UFunction* findStateFunction(Name functionName) const;
+        UFunction* findStateFunction(Name functionName) const { return functionsFlat.find(functionName); }
 
         uint64_t probeMask = 0;
         uint64_t ignoreMask = 0;
         uint16_t labelTableOffset = 0;
         uint32_t stateFlags = 0;
         std::unordered_map<Name, UFunction*> functions;
+        FlatFuncTable functionsFlat;
+        UFunction* tickFunc = nullptr;
     };
 
     struct ClassDependency {
@@ -225,17 +281,30 @@ namespace dx {
         uint32_t scriptTextCrc = 0;
     };
 
+    enum : uint32_t {
+        CLS_Actor = 1u << 0,
+        CLS_Pawn = 1u << 1,
+        CLS_ScriptedPawn = 1u << 2,
+        CLS_PlayerPawn = 1u << 3,
+        CLS_Mover = 1u << 4,
+        CLS_Decal = 1u << 5,
+        CLS_ZoneInfo = 1u << 6,
+        CLS_SkyZoneInfo = 1u << 7,
+        CLS_LevelInfo = 1u << 8,
+    };
+
     class UClass : public UState {
     public:
         UClass() { typeBits |= OBJ_Class; }
         ~UClass() override;
         void serialize(Reader& reader, Linker& linker) override;
         void linkClass();
-        UFunction* findFunction(Name functionName) const;
+        UFunction* findFunction(Name functionName) const { return vtableFlat.find(functionName); }
         UState* findState(Name stateName) const;
         UClass* superClass() const;
 
         uint32_t classFlags = 0;
+        uint32_t classTypeBits = 0;
         uint32_t guid[4] = {};
         std::vector<ClassDependency> dependencies;
         std::vector<Name> packageImports;
@@ -243,10 +312,17 @@ namespace dx {
         Name configName;
         UObject* defaultObject = nullptr;
         std::unordered_map<Name, UFunction*> vtable;
+        FlatFuncTable vtableFlat;
         std::unordered_map<Name, UState*> states;
+        UFunction* classTickFunc = nullptr;
         std::vector<UClass*> nativeChain;
         size_t defaultsOffset = 0;
     };
+
+    inline bool UObject::hasClassBit(uint32_t bit) const
+    {
+        return cls && (cls->classTypeBits & bit) != 0;
+    }
 
     enum class PropType : uint8_t {
         Byte,

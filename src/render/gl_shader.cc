@@ -213,7 +213,11 @@ void main()
         color.rgb += texel.rgb * uTint.rgb * dynamic * 2.0;
     }
     mediump vec3 finalRgb = clamp(color.rgb + vFog, 0.0, 1.0);
-    fragColor = vec4(pow(max(finalRgb, vec3(1e-5)), vec3(uGamma)), color.a);
+    if (uGamma != 1.0)
+    {
+        finalRgb = pow(max(finalRgb, vec3(1e-5)), vec3(uGamma));
+    }
+    fragColor = vec4(finalRgb, color.a);
 }
 )";
 
@@ -644,20 +648,33 @@ void main()
         current = 0;
         glUseProgram(programs[0]);
 
-        glGenVertexArrays(1, &streamVao);
-        glGenBuffers(1, &streamVbo);
-        bindVao(streamVao);
-        glBindBuffer(GL_ARRAY_BUFFER, streamVbo);
-        setupAttributes();
+        glGenVertexArrays(static_cast<GLsizei>(StreamRingCount), streamVaos);
+        glGenBuffers(static_cast<GLsizei>(StreamRingCount), streamVbos);
+        glGenBuffers(static_cast<GLsizei>(StreamRingCount), streamEbos);
+        for (size_t i = 0; i < StreamRingCount; i++) {
+            bindVao(streamVaos[i]);
+            glBindBuffer(GL_ARRAY_BUFFER, streamVbos[i]);
+            setupAttributes();
+        }
     }
 
     UberShader::~UberShader()
     {
-        glDeleteBuffers(1, &streamVbo);
-        glDeleteVertexArrays(1, &streamVao);
+        glDeleteBuffers(static_cast<GLsizei>(StreamRingCount), streamEbos);
+        glDeleteBuffers(static_cast<GLsizei>(StreamRingCount), streamVbos);
+        glDeleteVertexArrays(static_cast<GLsizei>(StreamRingCount), streamVaos);
         for (GLuint program : programs) {
             glDeleteProgram(program);
         }
+    }
+
+    void UberShader::nextFrame()
+    {
+        streamRingIndex = (streamRingIndex + 1) % StreamRingCount;
+        streamOffset = 0;
+        streamEboOffset = 0;
+        frameDrawCalls = 0;
+        frameTriangles = 0;
     }
 
     void UberShader::setupAttributes()
@@ -730,6 +747,7 @@ void main()
         boundLightmap = ~0u;
         boundVao = ~0u;
         blendInitialized = false;
+        glActiveTexture(GL_TEXTURE0);
         glUseProgram(programs[current]);
     }
 
@@ -757,12 +775,16 @@ void main()
         glUniform2fv(location.scale, 1, state.scale);
         glUniform4fv(location.tint, 1, state.tint);
         glUniform1i(location.lightCount, state.lightCount);
-        glUniform4fv(location.lightPosition, static_cast<GLsizei>(MaxDynamicLights), state.lightPositions);
-        glUniform4fv(location.lightColor, static_cast<GLsizei>(MaxDynamicLights), state.lightColors);
-        glUniform4fv(location.lightDirection, static_cast<GLsizei>(MaxDynamicLights), state.lightDirections);
+        if (state.lightCount > 0) {
+            glUniform4fv(location.lightPosition, state.lightCount, state.lightPositions);
+            glUniform4fv(location.lightColor, state.lightCount, state.lightColors);
+            glUniform4fv(location.lightDirection, state.lightCount, state.lightDirections);
+        }
         glUniform3fv(location.eye, 1, state.eye);
         glUniform3fv(location.forward, 1, state.forward);
-        glUniform4fv(location.clipPlanes, 8, state.clipPlanes);
+        if (state.clipCount > 0) {
+            glUniform4fv(location.clipPlanes, state.clipCount, state.clipPlanes);
+        }
         glUniform1i(location.clipCount, state.clipCount);
         glUniform1f(location.occlusion, state.occlusion);
         glUniform1f(location.gamma, activeGamma());
@@ -912,10 +934,14 @@ void main()
         if (blendInitialized && mode == currentBlend) {
             return;
         }
+        const float prevGamma = blendInitialized ? activeGamma() : -1.0f;
         currentBlend = mode;
         blendInitialized = true;
-        markOthersStale();
-        glUniform1f(locations[current].gamma, activeGamma());
+        const float nextGamma = activeGamma();
+        if (nextGamma != prevGamma) {
+            markOthersStale();
+            glUniform1f(locations[current].gamma, nextGamma);
+        }
         switch (mode) {
         case BlendMode::Opaque:
         case BlendMode::Masked:
@@ -983,7 +1009,6 @@ void main()
             return;
         }
         boundTexture = texture;
-        glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, texture);
     }
 
@@ -1004,19 +1029,26 @@ void main()
             return 0;
         }
         size_t bytes = vertices.size() * sizeof(GLVertex);
-        bindVao(streamVao);
-        if (bytes > streamCapacity || streamOffset + bytes > streamCapacity) {
-            streamCapacity = std::max(streamCapacity, std::max(bytes, size_t { 16 } << 20));
-            if (streamVbo) {
-                glDeleteBuffers(1, &streamVbo);
+        uint32_t vao = streamVaos[streamRingIndex];
+        uint32_t& vbo = streamVbos[streamRingIndex];
+        size_t& capacity = streamCapacities[streamRingIndex];
+        bindVao(vao);
+        if (bytes > capacity || streamOffset + bytes > capacity) {
+            size_t newCapacity = std::max(capacity, std::max(bytes, size_t { 8 } << 20));
+            if (streamOffset > 0) {
+                if (vbo) {
+                    glDeleteBuffers(1, &vbo);
+                }
+                glGenBuffers(1, &vbo);
+                newCapacity = std::max(newCapacity, bytes);
             }
-            glGenBuffers(1, &streamVbo);
-            glBindBuffer(GL_ARRAY_BUFFER, streamVbo);
+            capacity = newCapacity;
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
             setupAttributes();
-            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(streamCapacity), nullptr, GL_STREAM_DRAW);
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(capacity), nullptr, GL_STREAM_DRAW);
             streamOffset = 0;
         } else {
-            glBindBuffer(GL_ARRAY_BUFFER, streamVbo);
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
         }
 #ifdef __EMSCRIPTEN__
         glBufferSubData(GL_ARRAY_BUFFER, static_cast<GLintptr>(streamOffset), static_cast<GLsizeiptr>(bytes), vertices.data());
@@ -1041,6 +1073,10 @@ void main()
         }
         int32_t first = stream(vertices);
         glDrawArrays(primitive, first, static_cast<GLsizei>(vertices.size()));
+        frameDrawCalls++;
+        if (primitive == GL_TRIANGLES) {
+            frameTriangles += static_cast<int32_t>(vertices.size() / 3);
+        }
     }
 
     void UberShader::upload(const std::vector<GLVertex>& vertices)
@@ -1048,13 +1084,65 @@ void main()
         uploadBase = stream(vertices);
     }
 
+    GLVertex* UberShader::beginUpload(size_t vertexCount)
+    {
+#ifdef __EMSCRIPTEN__
+        (void)vertexCount;
+        return nullptr;
+#else
+        if (vertexCount == 0) {
+            return nullptr;
+        }
+        size_t bytes = vertexCount * sizeof(GLVertex);
+        uint32_t vao = streamVaos[streamRingIndex];
+        uint32_t& vbo = streamVbos[streamRingIndex];
+        size_t& capacity = streamCapacities[streamRingIndex];
+        bindVao(vao);
+        if (bytes > capacity || streamOffset + bytes > capacity) {
+            size_t newCapacity = std::max(capacity, std::max(bytes, size_t { 8 } << 20));
+            if (streamOffset > 0) {
+                if (vbo) {
+                    glDeleteBuffers(1, &vbo);
+                }
+                glGenBuffers(1, &vbo);
+                newCapacity = std::max(newCapacity, bytes);
+            }
+            capacity = newCapacity;
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+            setupAttributes();
+            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(capacity), nullptr, GL_STREAM_DRAW);
+            streamOffset = 0;
+        } else {
+            glBindBuffer(GL_ARRAY_BUFFER, vbo);
+        }
+        void* target = glMapBufferRange(GL_ARRAY_BUFFER, static_cast<GLintptr>(streamOffset), static_cast<GLsizeiptr>(bytes), GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+        if (!target) {
+            return nullptr;
+        }
+        uploadBase = static_cast<int32_t>(streamOffset / sizeof(GLVertex));
+        streamOffset += bytes;
+        return static_cast<GLVertex*>(target);
+#endif
+    }
+
+    void UberShader::endUpload()
+    {
+#ifndef __EMSCRIPTEN__
+        glUnmapBuffer(GL_ARRAY_BUFFER);
+#endif
+    }
+
     void UberShader::drawRange(int32_t first, int32_t count, uint32_t primitive)
     {
         if (count <= 0) {
             return;
         }
-        bindVao(streamVao);
+        bindVao(streamVaos[streamRingIndex]);
         glDrawArrays(primitive, uploadBase + first, count);
+        frameDrawCalls++;
+        if (primitive == GL_TRIANGLES) {
+            frameTriangles += count / 3;
+        }
     }
 
     uint32_t UberShader::createStatic(const std::vector<GLVertex>& vertices, uint32_t& buffer)
@@ -1076,18 +1164,95 @@ void main()
 
     void UberShader::drawStatic(uint32_t vao, int32_t first, int32_t count)
     {
+        if (count <= 0) {
+            return;
+        }
         bindVao(vao);
         glDrawArrays(GL_TRIANGLES, first, count);
+        frameDrawCalls++;
+        frameTriangles += count / 3;
     }
 
     void UberShader::drawStaticRanges(uint32_t vao, const int32_t* firsts, const int32_t* counts, int32_t ranges)
     {
-        bindVao(vao);
-        if (ranges == 1) {
-            glDrawArrays(GL_TRIANGLES, firsts[0], counts[0]);
+        if (ranges <= 0) {
             return;
         }
+        bindVao(vao);
+        if (ranges == 1) {
+            if (counts[0] > 0) {
+                glDrawArrays(GL_TRIANGLES, firsts[0], counts[0]);
+                frameDrawCalls++;
+                frameTriangles += counts[0] / 3;
+            }
+            return;
+        }
+#ifdef __ANDROID__
+        int32_t total = 0;
+        for (int32_t i = 0; i < ranges; i++) {
+            if (counts[i] > 0) {
+                total += counts[i];
+            }
+        }
+        if (total <= 0) {
+            return;
+        }
+        const size_t bytes = static_cast<size_t>(total) * sizeof(uint32_t);
+        uint32_t& ebo = streamEbos[streamRingIndex];
+        size_t& cap = streamEboCapacities[streamRingIndex];
+        if (bytes > cap || streamEboOffset + bytes > cap) {
+            size_t newCap = std::max(cap, std::max(bytes, size_t { 1 } << 20));
+            if (streamEboOffset > 0) {
+                if (ebo) {
+                    glDeleteBuffers(1, &ebo);
+                }
+                glGenBuffers(1, &ebo);
+                newCap = std::max(newCap, bytes);
+            }
+            cap = newCap;
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(cap), nullptr, GL_STREAM_DRAW);
+            streamEboOffset = 0;
+        } else {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        }
+        void* mapped = glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLintptr>(streamEboOffset), static_cast<GLsizeiptr>(bytes), GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+        if (mapped) {
+            uint32_t* dst = static_cast<uint32_t*>(mapped);
+            for (int32_t i = 0; i < ranges; i++) {
+                const uint32_t base = static_cast<uint32_t>(firsts[i]);
+                const int32_t cnt = counts[i];
+                for (int32_t j = 0; j < cnt; j++) {
+                    *dst++ = base + static_cast<uint32_t>(j);
+                }
+            }
+            glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+        } else {
+            static std::vector<uint32_t> fallbackIndices;
+            fallbackIndices.clear();
+            fallbackIndices.reserve(static_cast<size_t>(total));
+            for (int32_t i = 0; i < ranges; i++) {
+                const uint32_t base = static_cast<uint32_t>(firsts[i]);
+                const int32_t cnt = counts[i];
+                for (int32_t j = 0; j < cnt; j++) {
+                    fallbackIndices.push_back(base + static_cast<uint32_t>(j));
+                }
+            }
+            glBufferSubData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLintptr>(streamEboOffset), static_cast<GLsizeiptr>(bytes), fallbackIndices.data());
+        }
+        glDrawElements(GL_TRIANGLES, total, GL_UNSIGNED_INT, reinterpret_cast<const void*>(streamEboOffset));
+        streamEboOffset += bytes;
+        frameDrawCalls++;
+        frameTriangles += total / 3;
+#else
         glMultiDrawArrays(GL_TRIANGLES, firsts, counts, ranges);
+        frameDrawCalls++;
+        for (int32_t i = 0; i < ranges; i++) {
+            if (counts[i] > 0) {
+                frameTriangles += counts[i] / 3;
+            }
+        }
+#endif
     }
 
     GammaPass::GammaPass()
@@ -1221,6 +1386,49 @@ void main()
         glDeleteProgram(program);
     }
 
+    void ScenePass::prepareColorResolve(int width, int height)
+    {
+        if (!fxaaFramebuffer) {
+            glGenFramebuffers(1, &fxaaFramebuffer);
+            fxaaTextureAttached = false;
+        }
+        if (width != textureWidth || height != textureHeight || !fxaaTextureAttached) {
+            GLint prevActive = 0;
+            glGetIntegerv(GL_ACTIVE_TEXTURE, &prevActive);
+            glActiveTexture(GL_TEXTURE0);
+            GLint bound = 0;
+            glGetIntegerv(GL_TEXTURE_BINDING_2D, &bound);
+            glBindTexture(GL_TEXTURE_2D, texture);
+            if (width != textureWidth || height != textureHeight) {
+                glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+                textureWidth = width;
+                textureHeight = height;
+            }
+            GLint prevDraw = 0;
+            glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &prevDraw);
+            glBindFramebuffer(GL_FRAMEBUFFER, fxaaFramebuffer);
+            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
+            fxaaTextureAttached = true;
+            glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(prevDraw));
+            glBindTexture(GL_TEXTURE_2D, static_cast<GLuint>(bound));
+            glActiveTexture(static_cast<GLenum>(prevActive));
+        }
+    }
+
+    uint32_t ScenePass::resolveColorForOcclusion(int width, int height)
+    {
+        if (!offscreen || bufferSamples == 0) {
+            return 0;
+        }
+        prepareColorResolve(width, height);
+        glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+        glReadBuffer(GL_COLOR_ATTACHMENT0);
+        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fxaaFramebuffer);
+        glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        colorResolved = true;
+        return fxaaFramebuffer;
+    }
+
     void ScenePass::begin(int width, int height, int samples, bool occlusion, int32_t targetFbo)
     {
 #ifdef __ANDROID__
@@ -1233,6 +1441,7 @@ void main()
         blendWritesMask = false;
         maskWrites = false;
         maskClean = false;
+        colorResolved = false;
         if (!offscreen) {
             if (framebuffer) {
                 glDeleteFramebuffers(1, &framebuffer);
@@ -1254,6 +1463,9 @@ void main()
             target = targetFbo;
         } else {
             glGetIntegerv(GL_DRAW_FRAMEBUFFER_BINDING, &target);
+        }
+        if (samples > 0 && occlusion) {
+            prepareColorResolve(width, height);
         }
         if (!framebuffer) {
             glGenFramebuffers(1, &framebuffer);
@@ -1338,21 +1550,19 @@ void main()
                 glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
             }
             if (fxaa) {
-                if (!fxaaFramebuffer) {
-                    glGenFramebuffers(1, &fxaaFramebuffer);
+                if (!colorResolved) {
+                    prepareColorResolve(width, height);
+                    glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+                    glReadBuffer(GL_COLOR_ATTACHMENT0);
+                    glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fxaaFramebuffer);
+                    glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+#ifdef __ANDROID__
+                    const GLenum attachments[3] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_STENCIL_ATTACHMENT, GL_COLOR_ATTACHMENT1 };
+                    glInvalidateFramebuffer(GL_READ_FRAMEBUFFER, bufferOcclusion ? 3 : 2, attachments);
+#endif
                 }
                 glActiveTexture(GL_TEXTURE0);
                 glBindTexture(GL_TEXTURE_2D, texture);
-                if (width != textureWidth || height != textureHeight) {
-                    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
-                    glBindFramebuffer(GL_FRAMEBUFFER, fxaaFramebuffer);
-                    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, texture, 0);
-                    textureWidth = width;
-                    textureHeight = height;
-                }
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
-                glBindFramebuffer(GL_DRAW_FRAMEBUFFER, fxaaFramebuffer);
-                glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
                 glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(target));
                 glDisable(GL_SCISSOR_TEST);
                 glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
@@ -1361,14 +1571,23 @@ void main()
                 offscreen = false;
                 occlusionActive = false;
                 occlusionCapture = false;
+                colorResolved = false;
             } else {
-                glBindFramebuffer(GL_READ_FRAMEBUFFER, framebuffer);
+                glBindFramebuffer(GL_READ_FRAMEBUFFER, colorResolved ? fxaaFramebuffer : framebuffer);
+                glReadBuffer(GL_COLOR_ATTACHMENT0);
                 glBindFramebuffer(GL_DRAW_FRAMEBUFFER, static_cast<GLuint>(target));
                 glBlitFramebuffer(0, 0, width, height, 0, 0, width, height, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+#ifdef __ANDROID__
+                if (!colorResolved) {
+                    const GLenum attachments[3] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_STENCIL_ATTACHMENT, GL_COLOR_ATTACHMENT1 };
+                    glInvalidateFramebuffer(GL_READ_FRAMEBUFFER, bufferOcclusion ? 3 : 2, attachments);
+                }
+#endif
                 glBindFramebuffer(GL_FRAMEBUFFER, static_cast<GLuint>(target));
                 offscreen = false;
                 occlusionActive = false;
                 occlusionCapture = false;
+                colorResolved = false;
                 return;
             }
         } else if (fxaa) {
@@ -1378,6 +1597,7 @@ void main()
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
                 textureWidth = width;
                 textureHeight = height;
+                fxaaTextureAttached = false;
             }
             glCopyTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, 0, 0, width, height);
         } else {
@@ -1649,7 +1869,7 @@ void main()
         glDrawArrays(GL_TRIANGLES, 0, 3);
     }
 
-    void OcclusionPass::apply(uint32_t sceneFramebuffer, uint32_t sceneDepth, uint32_t sceneMask, int width, int height, OcclusionQuality quality, float nearPlane, float farPlane, float tanHalfWidth, float tanHalfHeight, bool colorMaskiSupported)
+    void OcclusionPass::apply(uint32_t sceneFramebuffer, uint32_t sceneDepth, uint32_t sceneMask, uint32_t resolveColorFbo, int width, int height, OcclusionQuality quality, float nearPlane, float farPlane, float tanHalfWidth, float tanHalfHeight, bool colorMaskiSupported)
     {
         glDisable(GL_BLEND);
         glDisable(GL_DEPTH_TEST);
@@ -1667,6 +1887,11 @@ void main()
         bool attached = sceneDepth != 0;
         if (!attached) {
             resolve(sceneFramebuffer, width, height);
+#ifdef __ANDROID__
+            glBindFramebuffer(GL_READ_FRAMEBUFFER, sceneFramebuffer);
+            const GLenum attachments[3] = { GL_COLOR_ATTACHMENT0, GL_DEPTH_STENCIL_ATTACHMENT, GL_COLOR_ATTACHMENT1 };
+            glInvalidateFramebuffer(GL_READ_FRAMEBUFFER, 3, attachments);
+#endif
             sceneDepth = depthTexture;
             sceneMask = maskTexture;
         } else {
@@ -1694,29 +1919,34 @@ void main()
         glUseProgram(blurResolve.id);
         glUniform2i(blurResolve.direction, 0, 1);
         run(blurResolve, resultFramebuffer, packedWidth, packedHeight, packedTextures[2], true);
-        glBindFramebuffer(GL_FRAMEBUFFER, sceneFramebuffer);
+        uint32_t compositeTarget = (!attached && resolveColorFbo) ? resolveColorFbo : sceneFramebuffer;
+        glBindFramebuffer(GL_FRAMEBUFFER, compositeTarget);
         if (attached) {
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, 0, 0);
         }
-        if (colorMaskiSupported) {
-            glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
-        } else {
-            GLenum colorOnly = GL_COLOR_ATTACHMENT0;
-            glDrawBuffers(1, &colorOnly);
+        if (compositeTarget == sceneFramebuffer) {
+            if (colorMaskiSupported) {
+                glColorMaski(1, GL_FALSE, GL_FALSE, GL_FALSE, GL_FALSE);
+            } else {
+                GLenum colorOnly = GL_COLOR_ATTACHMENT0;
+                glDrawBuffers(1, &colorOnly);
+            }
         }
         glEnable(GL_BLEND);
         glBlendFunc(GL_ZERO, GL_SRC_COLOR);
         glUseProgram(composite.id);
         glUniform4f(composite.mapping, 1.0f / (scale * static_cast<float>(packedWidth)), 1.0f / (scale * static_cast<float>(packedHeight)), (0.5f - 0.5f / scale) / static_cast<float>(packedWidth), (0.5f - 0.5f / scale) / static_cast<float>(packedHeight));
-        run(composite, sceneFramebuffer, width, height, resultTexture, false);
+        run(composite, compositeTarget, width, height, resultTexture, false);
         if (attached) {
             glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT1, GL_TEXTURE_2D, sceneMask, 0);
         }
-        if (colorMaskiSupported) {
-            glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
-        } else {
-            GLenum restoredBuffers[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
-            glDrawBuffers(2, restoredBuffers);
+        if (compositeTarget == sceneFramebuffer) {
+            if (colorMaskiSupported) {
+                glColorMaski(1, GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
+            } else {
+                GLenum restoredBuffers[2] = { GL_COLOR_ATTACHMENT0, GL_COLOR_ATTACHMENT1 };
+                glDrawBuffers(2, restoredBuffers);
+            }
         }
         glDisable(GL_BLEND);
         glBlendFunc(GL_ONE, GL_ZERO);

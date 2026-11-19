@@ -521,7 +521,7 @@ namespace dx {
             });
             forEachActor([this](UObject* a) {
                 region(a) = { levelInfo, -1, 0 };
-                if (isPawn(a)) {
+                if (a->hasClassBit(CLS_Pawn)) {
                     *reinterpret_cast<PointRegion*>(pawn::FootRegion(a)) = { levelInfo, -1, 0 };
                     *reinterpret_cast<PointRegion*>(pawn::HeadRegion(a)) = { levelInfo, -1, 0 };
                 }
@@ -852,7 +852,7 @@ namespace dx {
         actor::Rotation(a) = rotation;
         collisionHash.update(a);
         region(a) = { levelInfo, -1, 0 };
-        if (isPawn(a)) {
+        if (a->hasClassBit(CLS_Pawn)) {
             *reinterpret_cast<PointRegion*>(pawn::FootRegion(a)) = { levelInfo, -1, 0 };
             *reinterpret_cast<PointRegion*>(pawn::HeadRegion(a)) = { levelInfo, -1, 0 };
         }
@@ -1061,8 +1061,7 @@ namespace dx {
             return false;
         }
         actor::bTicked(a) = tickParity;
-        static const Name nameScriptedPawn("ScriptedPawn");
-        if (a->isA(nameScriptedPawn) && !deusex::scriptedPawnTick(*this, a, deltaSeconds)) {
+        if (a->hasClassBit(CLS_ScriptedPawn) && !deusex::scriptedPawnTick(*this, a, deltaSeconds)) {
             return true;
         }
         if (inStasis(a)) {
@@ -1072,23 +1071,44 @@ namespace dx {
             return true;
         }
 
-        updateAnimation(a, deltaSeconds);
-        if (a->destroyed) {
-            return true;
+        if (actor::Mesh(a)) {
+            updateAnimation(a, deltaSeconds);
+            if (a->destroyed) {
+                return true;
+            }
         }
 
         const bool detail = profDetail;
         float t2 = detail ? tickNowMs() : 0.0f;
-        bool isPlayer = playerPawnOf(a) != nullptr;
+        bool isPlayer = (a == localPlayer) || (a->hasClassBit(CLS_PlayerPawn) && playerPawnOf(a) != nullptr);
         if (!isPlayer) {
             if (levelinfo::bPlayersOnly(levelInfo)) {
                 return true;
             }
-            static const Name nameTick("Tick");
-            vm::Call tick(a, nameTick);
-            if (tick.valid()) {
-                profTickVmCount++;
-                tick.f(deltaSeconds).run();
+            static const int32_t tickProbe = vm::probeIndex(Name("Tick"));
+            UFunction* tickFn = nullptr;
+            if (a->cls) {
+                bool probing = true;
+                if (a->stateFrame) {
+                    const StateFrame& sf = *a->stateFrame;
+                    if (tickProbe >= 0 && ((sf.disabledProbes & (1ull << tickProbe)) || (sf.state && !(sf.state->ignoreMask & (1ull << tickProbe))))) {
+                        probing = false;
+                    } else if (sf.state && sf.state->tickFunc) {
+                        tickFn = sf.state->tickFunc;
+                    }
+                }
+                if (probing && !tickFn) {
+                    tickFn = a->cls->classTickFunc;
+                }
+            }
+            bool ranTick = false;
+            if (tickFn && (!vm::skipNoopCalls || !tickFn->isNoop || tickFn->scriptOverride)) {
+                vm::Call tick(a, tickFn);
+                if (tick.valid()) {
+                    ranTick = true;
+                    profTickVmCount++;
+                    tick.f(deltaSeconds).run();
+                }
             }
             if (detail) {
                 float dt = tickNowMs() - t2;
@@ -1097,7 +1117,7 @@ namespace dx {
                     profTickTopMs = dt;
                     profTickTopClass = a->cls->name.c_str();
                 }
-                if (tick.valid() && a->cls) {
+                if (ranTick && a->cls) {
                     auto& stat = profClassStats[a->cls];
                     stat.first += dt;
                     stat.second += 1;
@@ -1128,8 +1148,14 @@ namespace dx {
             return true;
         }
 
-        latent::poll(a, deltaSeconds);
-        vm::runStateCode(a);
+        if (a->stateFrame) {
+            if (a->stateFrame->latentAction != 0) {
+                latent::poll(a, deltaSeconds);
+            }
+            if (a->stateFrame && a->stateFrame->code && a->stateFrame->latentAction == 0) {
+                vm::runStateCode(a);
+            }
+        }
         if (a->destroyed) {
             return true;
         }
@@ -1176,7 +1202,7 @@ namespace dx {
             return true;
         }
 
-        if (isPawn(a)) {
+        if (a->hasClassBit(CLS_Pawn)) {
             if (pawn::bIsPlayer(a)) {
                 static const Name nameUpdateEyeHeight("UpdateEyeHeight");
                 vm::Call eyeHeight(a, nameUpdateEyeHeight);

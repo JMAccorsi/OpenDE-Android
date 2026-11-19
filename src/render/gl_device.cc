@@ -121,7 +121,8 @@ namespace dx {
             return;
         }
         scenePass->endOcclusion();
-        occlusionPass->apply(scenePass->sceneFramebuffer(), scenePass->sceneDepth(), scenePass->sceneMask(), sceneWidth, sceneHeight, occlusionQuality, nearPlane, farPlane, tanHalfWidth, tanHalfHeight, scenePass->supportsColorMaski());
+        uint32_t resolveColorFbo = scenePass->resolveColorForOcclusion(sceneWidth, sceneHeight);
+        occlusionPass->apply(scenePass->sceneFramebuffer(), scenePass->sceneDepth(), scenePass->sceneMask(), resolveColorFbo, sceneWidth, sceneHeight, occlusionQuality, nearPlane, farPlane, tanHalfWidth, tanHalfHeight, scenePass->supportsColorMaski());
         shader->use();
     }
 
@@ -333,6 +334,16 @@ namespace dx {
         shader->upload(vertices);
     }
 
+    GLVertex* GLRenderDevice::beginUpload(size_t vertexCount)
+    {
+        return shader->beginUpload(vertexCount);
+    }
+
+    void GLRenderDevice::endUpload()
+    {
+        shader->endUpload();
+    }
+
     void GLRenderDevice::drawRange(int32_t first, int32_t count)
     {
         shader->drawRange(first, count);
@@ -410,6 +421,8 @@ namespace dx {
 
     void GLRenderDevice::beginTextureFrame(double time)
     {
+        shader->nextFrame();
+        lightmapUploadsCount = 0;
         textures->beginFrame(time);
     }
 
@@ -464,6 +477,7 @@ namespace dx {
 
     void GLRenderDevice::updateLightmap(uint32_t texture, int32_t x, int32_t y, int32_t width, int32_t height, const uint8_t* rgba)
     {
+        lightmapUploadsCount++;
         shader->invalidateTexture();
         glBindTexture(GL_TEXTURE_2D, texture);
         glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, rgba);
@@ -490,5 +504,12 @@ namespace dx {
     void GLRenderDevice::flushCanvas()
     {
         canvasImpl->flush();
+    }
+
+    void GLRenderDevice::frameCounters(int32_t& drawCalls, int32_t& triangles, int32_t& lightmapUploads) const
+    {
+        drawCalls = shader->drawCalls();
+        triangles = shader->triangles();
+        lightmapUploads = lightmapUploadsCount;
     }
 }

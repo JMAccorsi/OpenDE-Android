@@ -57,9 +57,21 @@ namespace dx {
         bool editorMode();
         void registerFactory(Name nativeClass, ObjectFactory factory);
         void registerObject(UObject* object);
-        UObject* fromHandle(uint32_t handle);
-        const std::vector<UObject*>& all();
+        extern UObject* const* gHandleData;
+        extern size_t gHandleSize;
         void ensureLoaded(UObject* object);
+        inline UObject* fromHandle(uint32_t handle)
+        {
+            if (handle == 0 || handle >= gHandleSize) {
+                return nullptr;
+            }
+            UObject* object = gHandleData[handle];
+            if (object && !object->loaded) {
+                ensureLoaded(object);
+            }
+            return object;
+        }
+        const std::vector<UObject*>& all();
         void flushLoads();
         void queueLoad(UObject* object);
         UClass* findClass(std::string_view path);

@@ -430,6 +430,8 @@ namespace dx {
             reg.root = gameRoot;
             if (reg.table.empty()) {
                 reg.table.push_back(nullptr);
+                gHandleData = reg.table.data();
+                gHandleSize = reg.table.size();
             }
             const char* folders[] = { "System", "Textures", "Sounds", "Music", "Maps" };
             const char* extensions[] = { ".u", ".utx", ".uax", ".umx", ".dx", ".unr" };
@@ -605,6 +607,9 @@ namespace dx {
             registry().factories[nativeClass] = std::move(factory);
         }
 
+        UObject* const* gHandleData = nullptr;
+        size_t gHandleSize = 0;
+
         void registerObject(UObject* object)
         {
             Registry& reg = registry();
@@ -613,19 +618,8 @@ namespace dx {
             }
             object->handle = static_cast<uint32_t>(reg.table.size());
             reg.table.push_back(object);
-        }
-
-        UObject* fromHandle(uint32_t handle)
-        {
-            Registry& reg = registry();
-            if (handle == 0 || handle >= reg.table.size()) {
-                return nullptr;
-            }
-            UObject* object = reg.table[handle];
-            if (object && !object->loaded) {
-                ensureLoaded(object);
-            }
-            return object;
+            gHandleData = reg.table.data();
+            gHandleSize = reg.table.size();
         }
 
         const std::vector<UObject*>& all()

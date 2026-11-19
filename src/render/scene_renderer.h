@@ -10,10 +10,13 @@
 #include "render/view_modes.h"
 
 #include <array>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -42,8 +45,20 @@ namespace dx {
         float actEmitMs = 0;
         float actFlushMs = 0;
         float coronasMs = 0;
+        float ssaoMs = 0;
+        float fxaaMs = 0;
         int actBatches = 0;
         int actActors = 0;
+        int drawCalls = 0;
+        int triangles = 0;
+        int lightmapUploads = 0;
+        int meshFast = 0;
+        int meshFull = 0;
+        int meshRebuild = 0;
+        int meshFog = 0;
+        int meshRebGeom = 0;
+        int meshRebUncache = 0;
+        int meshRebLight = 0;
     };
 
     struct RenderOptions {
@@ -158,6 +173,7 @@ namespace dx {
             std::vector<int32_t> nodeMirror;
             std::vector<int32_t> nodeEmitStart;
             std::vector<NodeEmit> nodeEmits;
+            std::vector<uint64_t> nodeEmitZoneMask;
             std::vector<uint32_t> nodeStamp;
             std::vector<uint32_t> surfStamp;
             std::vector<uint32_t> leafStamp;
@@ -185,12 +201,24 @@ namespace dx {
             bool cull = false;
         };
 
-        struct MeshBatch {
+        struct QueuedGroup {
             uint32_t flags = 0;
             uint32_t texture = 0;
             GroupExtra extra;
-            std::vector<GLVertex> vertices;
-            std::vector<const std::vector<GLVertex>*> refs;
+            const std::vector<GLVertex>* ref = nullptr;
+            uint32_t tempOffset = 0;
+            uint32_t tempCount = 0;
+        };
+
+        struct BatchQueue {
+            std::vector<QueuedGroup> items;
+            std::vector<GLVertex> tempVertices;
+
+            void clear()
+            {
+                items.clear();
+                tempVertices.clear();
+            }
         };
 
         struct TranslucentItem {
@@ -231,6 +259,13 @@ namespace dx {
         struct MeshDrawCache {
             bool valid = false;
             bool cacheable = false;
+            bool hasEnvironment = false;
+            bool hasRawTransform = false;
+            bool steadyLights = false;
+            Vector rawLocation {};
+            Vector rawPrePivot {};
+            Rotator rawRotation {};
+            float rawDrawScale = 0;
             MeshTransform transform;
             Name sequence;
             float frame = 0;
@@ -239,6 +274,9 @@ namespace dx {
             Vector sphereCenter;
             float sphereRadius = 0;
             float lodTarget = -1;
+            int32_t lodVertexSubset = -1;
+            int32_t lodNonMorph = -1;
+            bool lodMorph = false;
             std::vector<Vector> world;
             std::vector<Vector> worldNormals;
             bool lodTriangles = false;
@@ -312,7 +350,7 @@ namespace dx {
         };
 
         void buildLevel(ULevel* level, const std::vector<UObject*>& actors);
-        void drawLevelGeometry(const View& view, bool translucentPass);
+        void drawLevelGeometry(const View& view, bool translucentPass, const std::function<void()>& afterGather = nullptr);
         void drawDetail(const Batch& batch, const View& view, int32_t onlyNode);
         void drawBatch(const Batch& batch, const View& view, const int32_t* firsts, const int32_t* counts, int32_t ranges, int32_t onlyNode, uint32_t& uploadedLights);
         void occludeView(View& view, const std::vector<ScreenSpan>* open);
@@ -326,22 +364,23 @@ namespace dx {
         bool surfaceFog(int32_t surfIndex, const View& view);
         void drawFog(const Batch& batch, const View& view, int32_t onlyNode);
         Vector meshFog(const Vector& point, const View& view, size_t count) const;
-        void drawActors(const std::vector<UObject*>& actors, const View& view, UObject* viewActor, bool occlude);
+        void drawActors(const std::vector<UObject*>& actors, const View& view, UObject* viewActor, bool occlude, bool preGathered = false);
+        void gatherActorCandidates(const std::vector<UObject*>& actors, const View& view, UObject* viewActor);
         bool actorBounds(UObject* actor, Vector& center, float& radius) const;
         void cullOccluded(std::vector<UObject*>& candidates, const View& view);
         void applyView(const View& view);
         void drawActor(UObject* actor, const View& view);
         void drawMesh(UObject* actor, const View& view);
-        void drawMeshWith(UObject* actor, UObject* lightActor, UMesh* mesh, UObject* animSource, const MeshTransform& transform, const View& view, std::vector<Vector>* worldOut);
+        void drawMeshWith(UObject* actor, UObject* lightActor, UMesh* mesh, UObject* animSource, const MeshTransform& transform, const View& view, MeshDrawCache* preResolvedCache = nullptr);
         void drawSprite(UObject* actor, const View& view);
         void drawBrush(UObject* actor, const View& view);
         void drawMoverSurfaces(UObject* actor, UModel* brush);
-        void flushMeshBatches();
+        int flushMeshBatches();
         void flushTranslucent(const View& view);
         void drawGroup(uint32_t flags, uint32_t texture, const GroupExtra& extra, const std::vector<GLVertex>& vertices);
         void setActorOrder(UObject* actor, const View& view, int32_t knownLeaf = -1);
         void queueTranslucent(uint32_t flags, uint32_t texture, const GroupExtra& extra, const std::vector<GLVertex>& vertices);
-        void flushBatches(std::unordered_map<uint64_t, MeshBatch>& batches);
+        int flushBatches(BatchQueue& queue);
         View makeView(const Vector& location, const Rotator& rotation, float fov, float nearPlane);
         View makeView(const Vector& location, const Coords& axes, float fov, float nearPlane);
         UObject* zoneActor(uint8_t zone) const;
@@ -365,7 +404,7 @@ namespace dx {
         void drawDecal(UObject* actor, const View& view);
         bool sameLights(const LightState& state) const;
         void storeLights(LightState& state) const;
-        void appendGroups(const std::vector<EmittedGroup>& groups, std::unordered_map<uint64_t, MeshBatch>& opaque, bool persistent = false);
+        void appendGroups(const std::vector<EmittedGroup>& groups, BatchQueue& opaque, bool persistent = false);
         void selectLights(const Vector& location, float extent);
         void selectActorLights(UObject* actor);
         void applyBlend(uint32_t polyFlags, int32_t extraFlags);
@@ -378,6 +417,8 @@ namespace dx {
         LightmapAtlas lightmaps;
         LevelData levelData;
         std::vector<UObject*> lights;
+        std::vector<UObject*> nonStaticLights;
+        std::vector<UObject*> scratchAccepted;
         std::vector<PreparedLight> lightPrepared;
         std::vector<Vector> lightColors;
         std::vector<UObject*> actorLights;
@@ -425,7 +466,19 @@ namespace dx {
         std::vector<uint32_t> scratchSlotFlags;
         std::vector<size_t> scratchSlotGroups;
         std::unordered_map<UMesh*, std::vector<MeshTriangle>> triangleCache;
-        std::map<std::pair<UObject*, UMesh*>, MeshPoseCaches> poseCaches;
+        struct PoseCacheKey {
+            UObject* actor = nullptr;
+            UMesh* mesh = nullptr;
+            bool operator==(const PoseCacheKey& o) const { return actor == o.actor && mesh == o.mesh; }
+        };
+        struct PoseCacheKeyHash {
+            size_t operator()(const PoseCacheKey& k) const
+            {
+                size_t h = reinterpret_cast<uintptr_t>(k.actor);
+                return h ^ (reinterpret_cast<uintptr_t>(k.mesh) * 0x9e3779b97f4a7c15ULL + 0x9e3779b9 + (h << 6) + (h >> 2));
+            }
+        };
+        std::unordered_map<PoseCacheKey, MeshPoseCaches, PoseCacheKeyHash> poseCaches;
         struct MeshDrawKey {
             UObject* actor = nullptr;
             UMesh* mesh = nullptr;
@@ -451,6 +504,7 @@ namespace dx {
         std::unordered_map<UObject*, BrushDrawCache> brushDrawCaches;
         std::unordered_map<UObject*, OcclusionState> occlusion;
         std::vector<UObject*> scratchCandidates;
+        std::vector<UObject*> scratchIterated;
         std::vector<UObject*> scratchDecals;
         std::vector<GLVertex> occlusionBoxes;
         SpanBuffer spans;
@@ -462,8 +516,13 @@ namespace dx {
         std::vector<std::shared_ptr<ViewVisibility>> visibilityPool;
         std::vector<ScreenPoint> scratchPendingPoints;
         std::vector<int32_t> scratchPendingCounts;
-        std::vector<std::pair<int32_t, int32_t>> scratchOccStack;
-        std::vector<Vector> scratchAttachWorld;
+        struct OccStackEntry {
+            int32_t index = 0;
+            int32_t stage = 0;
+            uint32_t planeMask = 0;
+        };
+        std::vector<OccStackEntry> scratchOccStack;
+        std::vector<EmittedGroup> scratchOldGroups;
         std::vector<GLVertex> scratchSpriteVertices;
         std::vector<GLVertex> scratchDecalVertices;
         std::vector<Vector> scratchDecalPolygon;
@@ -473,13 +532,18 @@ namespace dx {
         std::vector<OcclusionState*> occlusionIssued;
         std::unordered_set<UObject*> occlusionUnconfirmed;
         uint64_t sceneFrame = 0;
-        std::unordered_map<uint64_t, MeshBatch> meshBatches;
-        std::unordered_map<uint64_t, MeshBatch> brushBatches;
+        BatchQueue meshBatches;
+        BatchQueue brushBatches;
+        BatchQueue decalBatches;
         std::vector<TranslucentItem> translucentItems;
         size_t translucentCount = 0;
         std::vector<TranslucentSurface> scratchTranslucentSurfaces;
         std::vector<int32_t> nodeOrder;
         std::vector<int32_t> leafOrder;
+        UObject* orderActor = nullptr;
+        const View* orderView = nullptr;
+        int32_t orderLeaf = -1;
+        bool orderReady = false;
         int32_t currentOrder = 0;
         int32_t fallbackOrder = 0;
         float currentDistance = 0;
@@ -496,5 +560,20 @@ namespace dx {
         RenderOptions options;
         RenderMode renderMode = RenderMode::Textured;
         RenderStats frameStats;
+
+        struct Worker {
+            std::thread thread;
+            std::mutex mutex;
+            std::condition_variable cv;
+            std::function<void()> task;
+            bool busy = false;
+            bool stop = false;
+
+            Worker();
+            ~Worker();
+            void run(std::function<void()> fn);
+            void wait();
+        };
+        Worker worker;
     };
 }

@@ -136,6 +136,8 @@ namespace dx {
 
         virtual void draw(const std::vector<GLVertex>& vertices, Primitive primitive) = 0;
         virtual void upload(const std::vector<GLVertex>& vertices) = 0;
+        virtual GLVertex* beginUpload(size_t vertexCount) { (void)vertexCount; return nullptr; }
+        virtual void endUpload() {}
         virtual void drawRange(int32_t first, int32_t count) = 0;
         virtual uint32_t createStatic(const std::vector<GLVertex>& vertices) = 0;
         virtual void deleteStatic(uint32_t geometry) = 0;
@@ -163,5 +165,6 @@ namespace dx {
         virtual Canvas2D& canvas() = 0;
         virtual void beginCanvas(int width, int height) = 0;
         virtual void flushCanvas() = 0;
+        virtual void frameCounters(int32_t& drawCalls, int32_t& triangles, int32_t& lightmapUploads) const = 0;
     };
 }

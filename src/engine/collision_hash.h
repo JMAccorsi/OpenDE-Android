@@ -39,6 +39,7 @@ namespace dx {
         void insert(uint32_t slot);
         void erase(uint32_t slot);
         void place(uint32_t slot, const Vector& min, const Vector& max, bool bounded);
+        int32_t updateSlot(UObject* actor);
 
         std::vector<Entry> entries;
         std::vector<uint32_t> freeSlots;

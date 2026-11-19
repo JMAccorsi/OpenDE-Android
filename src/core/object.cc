@@ -569,6 +569,11 @@ namespace dx {
         if (functionFlags & FUNC_Native) {
             native = vm::bindNative(this);
         }
+        isNoop = !(functionFlags & FUNC_Native) && !returnParm && (
+            script.empty() ||
+            (script.size() == 1 && (script[0] == 0x53 || script[0] == 0x04)) ||
+            (script.size() == 2 && script[0] == 0x04 && script[1] == 0x0B) ||
+            (script.size() == 3 && script[0] == 0x04 && script[1] == 0x0B && script[2] == 0x53));
     }
 
     void UState::serialize(Reader& reader, Linker& source)
@@ -600,15 +605,9 @@ namespace dx {
                 functions[function->name] = function;
             }
         }
-    }
-
-    UFunction* UState::findStateFunction(Name functionName) const
-    {
-        auto it = functions.find(functionName);
-        if (it == functions.end()) {
-            return nullptr;
-        }
-        return it->second;
+        functionsFlat.build(functions);
+        static const Name nameTick("Tick");
+        tickFunc = findStateFunction(nameTick);
     }
 
     UClass::~UClass()
@@ -663,6 +662,36 @@ namespace dx {
         }
         link();
 
+        classTypeBits = parent ? parent->classTypeBits : 0;
+        static const Name nameActor("Actor");
+        static const Name namePawn("Pawn");
+        static const Name nameScriptedPawn("ScriptedPawn");
+        static const Name namePlayerPawn("PlayerPawn");
+        static const Name nameMover("Mover");
+        static const Name nameDecal("Decal");
+        static const Name nameZoneInfo("ZoneInfo");
+        static const Name nameSkyZoneInfo("SkyZoneInfo");
+        static const Name nameLevelInfo("LevelInfo");
+        if (name == nameActor) {
+            classTypeBits |= CLS_Actor;
+        } else if (name == namePawn) {
+            classTypeBits |= CLS_Pawn;
+        } else if (name == nameScriptedPawn) {
+            classTypeBits |= CLS_ScriptedPawn;
+        } else if (name == namePlayerPawn) {
+            classTypeBits |= CLS_PlayerPawn;
+        } else if (name == nameMover) {
+            classTypeBits |= CLS_Mover;
+        } else if (name == nameDecal) {
+            classTypeBits |= CLS_Decal;
+        } else if (name == nameZoneInfo) {
+            classTypeBits |= CLS_ZoneInfo;
+        } else if (name == nameSkyZoneInfo) {
+            classTypeBits |= CLS_SkyZoneInfo;
+        } else if (name == nameLevelInfo) {
+            classTypeBits |= CLS_LevelInfo;
+        }
+
         vtable.clear();
         states.clear();
         if (parent) {
@@ -676,6 +705,9 @@ namespace dx {
                 vtable[function->name] = function;
             }
         }
+        vtableFlat.build(vtable);
+        static const Name nameTick("Tick");
+        classTickFunc = findFunction(nameTick);
         for (UField* child = children; child; child = child->next) {
             if (UState* state = cast<UState>(child)) {
                 if (cast<UFunction>(child)) {
@@ -706,15 +738,6 @@ namespace dx {
         }
         objects::registerObject(defaultObject);
         objects::syncObjectProperties(defaultObject);
-    }
-
-    UFunction* UClass::findFunction(Name functionName) const
-    {
-        auto it = vtable.find(functionName);
-        if (it == vtable.end()) {
-            return nullptr;
-        }
-        return it->second;
     }
 
     UState* UClass::findState(Name stateName) const
