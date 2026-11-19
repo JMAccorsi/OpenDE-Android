@@ -92,14 +92,16 @@ namespace game {
         void onPhysicalInput(const TouchInputCallbacks& cb);
         void releaseGameplayInputs(const TouchInputCallbacks& cb);
         void emitAxes(const TouchInputCallbacks& cb);
+        void markTouchActive();
 
         // Handles touch events either in the layout editor or in active gameplay.
         // Returns true if the event was consumed by the overlay system.
         bool handleTouchEvent(const SDL_Event& event, int drawWidth, int drawHeight, const TouchInputCallbacks& cb);
+        bool handleKeypadExitTouch(const SDL_Event& event, int drawWidth, int drawHeight, float kx, float ky, float kw, float kh, const std::function<void()>& onClose);
         bool handleEditorPhysicalKey(SDL_Keycode sym, bool pressed);
         bool handleEditorControllerButton(SDL_GameControllerButton button, bool pressed);
 
-        void render(dx::Canvas2D& canvas, bool ptBr, bool gameplayBlocked);
+        void render(dx::Canvas2D& canvas, bool ptBr, bool gameplayBlocked, bool showKeypadExit = false, float kx = 0.0f, float ky = 0.0f, float kw = 0.0f, float kh = 0.0f);
 
     private:
         struct ButtonState {
@@ -124,6 +126,8 @@ namespace game {
         void renderEditor(dx::Canvas2D& canvas, bool ptBr);
         void getToolbarRect(int width, int height, float& outX, float& outY, float& outW, float& outH) const;
         bool handleEditorTouch(const SDL_Event& event, int drawWidth, int drawHeight);
+        void getKeypadExitRect(float fw, float fh, float kx, float ky, float kw, float kh, float& outX, float& outY, float& outW, float& outH) const;
+        void renderKeypadExit(dx::Canvas2D& canvas, bool ptBr, float kx, float ky, float kw, float kh);
 
         TouchOverlaySettings settings_;
         std::array<TouchControlLayout, kTouchControlCount> layouts_ {};
@@ -170,6 +174,9 @@ namespace game {
         bool hasHudTapFinger_ = false;
         SDL_FingerID hudTapFinger_ = 0;
         uint8_t hudTapKey_ = 0;
+
+        bool keypadExitDown_ = false;
+        SDL_FingerID keypadExitFinger_ = 0;
     };
 
 } // namespace game

@@ -61,6 +61,8 @@ namespace dx {
         bool wantsMouse();
         bool isModalOpen();
         bool isEditFocused();
+        bool keypadScreenRect(float& outX, float& outY, float& outW, float& outH);
+        bool closeKeypad();
 
         void setViewportSize(float width, float height);
         void setUIScale(float scale);

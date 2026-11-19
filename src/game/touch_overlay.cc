@@ -496,6 +496,14 @@ namespace game {
             hasHudTapFinger_ = false;
             hudTapKey_ = 0;
         }
+        keypadExitDown_ = false;
+    }
+
+    void TouchOverlayManager::markTouchActive()
+    {
+        if (settings_.enabled) {
+            visible_ = true;
+        }
     }
 
     void TouchOverlayManager::onPhysicalInput(const TouchInputCallbacks& cb)
@@ -503,9 +511,10 @@ namespace game {
         if (editorOpen_) {
             return;
         }
-        if (visible_ || hasStickFinger_ || hasLookFinger_ || crouchToggled_ || hasAugTapFinger_ || hasHudTapFinger_ || augDrawerOpen_) {
+        if (visible_ || hasStickFinger_ || hasLookFinger_ || crouchToggled_ || hasAugTapFinger_ || hasHudTapFinger_ || augDrawerOpen_ || keypadExitDown_) {
             visible_ = false;
             augDrawerOpen_ = false;
+            keypadExitDown_ = false;
             releaseAllControls(cb);
         }
     }
@@ -870,15 +879,98 @@ namespace game {
         return false;
     }
 
-    void TouchOverlayManager::render(dx::Canvas2D& canvas, bool ptBr, bool gameplayBlocked)
+    void TouchOverlayManager::getKeypadExitRect(float fw, float fh, float kx, float ky, float kw, float kh, float& outX, float& outY, float& outW, float& outH) const
+    {
+        const float gap = std::clamp(fh * 0.022f, 8.0f, 20.0f);
+        outW = std::max(kw, std::clamp(fw * 0.14f, 110.0f, 220.0f));
+        outH = std::clamp(fh * 0.075f, 38.0f, 72.0f);
+        outX = std::clamp(kx + (kw - outW) * 0.5f, 8.0f, std::max(8.0f, fw - outW - 8.0f));
+        outY = ky + kh + gap;
+        if (outY + outH > fh - 8.0f) {
+            outY = std::max(8.0f, ky - gap - outH);
+        }
+    }
+
+    bool TouchOverlayManager::handleKeypadExitTouch(const SDL_Event& event, int drawWidth, int drawHeight, float kx, float ky, float kw, float kh, const std::function<void()>& onClose)
+    {
+        if (!settings_.enabled || !visible_ || editorOpen_ || drawWidth <= 0 || drawHeight <= 0) {
+            keypadExitDown_ = false;
+            return false;
+        }
+        float bx = 0.0f;
+        float by = 0.0f;
+        float bw = 0.0f;
+        float bh = 0.0f;
+        getKeypadExitRect(static_cast<float>(drawWidth), static_cast<float>(drawHeight), kx, ky, kw, kh, bx, by, bw, bh);
+        const float px = event.tfinger.x * static_cast<float>(drawWidth);
+        const float py = event.tfinger.y * static_cast<float>(drawHeight);
+        const float pad = 6.0f;
+        const bool inBox = px >= bx - pad && px <= bx + bw + pad && py >= by - pad && py <= by + bh + pad;
+        if (event.type == SDL_FINGERDOWN) {
+            if (inBox) {
+                keypadExitDown_ = true;
+                keypadExitFinger_ = event.tfinger.fingerId;
+                return true;
+            }
+            return false;
+        }
+        if (event.type == SDL_FINGERMOTION) {
+            return keypadExitDown_ && event.tfinger.fingerId == keypadExitFinger_;
+        }
+        if (event.type == SDL_FINGERUP && keypadExitDown_ && event.tfinger.fingerId == keypadExitFinger_) {
+            keypadExitDown_ = false;
+            if (inBox && onClose) {
+                onClose();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    void TouchOverlayManager::renderKeypadExit(dx::Canvas2D& canvas, bool ptBr, float kx, float ky, float kw, float kh)
+    {
+        float bx = 0.0f;
+        float by = 0.0f;
+        float bw = 0.0f;
+        float bh = 0.0f;
+        getKeypadExitRect(canvas.width(), canvas.height(), kx, ky, kw, kh, bx, by, bw, bh);
+        const dx::LinearColor fill = keypadExitDown_
+            ? dx::LinearColor { 0.44f, 0.14f, 0.16f, 0.96f }
+            : dx::LinearColor { 0.24f, 0.08f, 0.10f, 0.88f };
+        const dx::LinearColor rim = keypadExitDown_
+            ? dx::LinearColor { 1.00f, 0.65f, 0.65f, 1.00f }
+            : dx::LinearColor { 0.95f, 0.45f, 0.45f, 0.92f };
+        canvas.drawRect(bx, by, bw, bh, fill, dx::BlendStyle::Normal);
+        drawRectOutline(canvas, bx, by, bw, bh, 2.0f, rim);
+        drawText(
+            canvas,
+            ptBr ? "X SAIR" : "X EXIT",
+            bx + bw * 0.5f,
+            by + bh * 0.5f,
+            std::max(2.0f, bh * 0.065f),
+            { 0.98f, 0.96f, 0.96f, 1.00f },
+            bw * 0.85f);
+    }
+
+    void TouchOverlayManager::render(dx::Canvas2D& canvas, bool ptBr, bool gameplayBlocked, bool showKeypadExit, float kx, float ky, float kw, float kh)
     {
         if (editorOpen_) {
             renderEditor(canvas, ptBr);
             return;
         }
-        if (!settings_.enabled || !visible_ || gameplayBlocked) {
+        if (!settings_.enabled || !visible_) {
+            keypadExitDown_ = false;
             return;
         }
+        if (gameplayBlocked) {
+            if (showKeypadExit) {
+                renderKeypadExit(canvas, ptBr, kx, ky, kw, kh);
+            } else {
+                keypadExitDown_ = false;
+            }
+            return;
+        }
+        keypadExitDown_ = false;
         renderGameplayOverlays(canvas, ptBr);
     }
 

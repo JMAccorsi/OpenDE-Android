@@ -3970,6 +3970,50 @@ namespace dx::extension {
         return false;
     }
 
+    bool keypadScreenRect(float& outX, float& outY, float& outW, float& outH)
+    {
+        State& s = state();
+        if (!s.root || s.root->destroyed || !s.root->isModalOpen()) {
+            return false;
+        }
+        static const Name nameHudKeypadWindow("HUDKeypadWindow");
+        float absX = 0.0f;
+        float absY = 0.0f;
+        UWindow* keypad = findVisibleWindowByClass(s.root, nameHudKeypadWindow, 0.0f, 0.0f, absX, absY);
+        if (!keypad) {
+            return false;
+        }
+        float scale = virtualScale();
+        if (scale <= 0.0f) {
+            return false;
+        }
+        outX = absX * scale;
+        outY = absY * scale;
+        outW = keypad->width() * scale;
+        outH = keypad->height() * scale;
+        return true;
+    }
+
+    bool closeKeypad()
+    {
+        State& s = state();
+        if (!s.root || s.root->destroyed) {
+            return false;
+        }
+        static const Name nameHudKeypadWindow("HUDKeypadWindow");
+        float absX = 0.0f;
+        float absY = 0.0f;
+        UWindow* keypad = findVisibleWindowByClass(s.root, nameHudKeypadWindow, 0.0f, 0.0f, absX, absY);
+        if (!keypad) {
+            return false;
+        }
+        vm::Call(s.root, Name("PopWindow")).run();
+        if (!keypad->destroyed) {
+            vm::Call(keypad, Name("Destroy")).run();
+        }
+        return true;
+    }
+
     void setViewportSize(float width, float height)
     {
         state().viewportWidth = width;

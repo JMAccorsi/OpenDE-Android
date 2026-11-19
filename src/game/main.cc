@@ -90,6 +90,7 @@ namespace {
         case SDLK_CAPSLOCK:
             return dx::IK_CapsLock;
         case SDLK_ESCAPE:
+        case SDLK_AC_BACK:
             return dx::IK_Escape;
         case SDLK_SPACE:
             return dx::IK_Space;
@@ -1281,6 +1282,17 @@ namespace {
             SDL_FingerID fid = event.tfinger.fingerId;
             if (dx::extension::wantsMouse() || dx::extension::isModalOpen()) {
                 dx::extension::setTouchInputActive(true);
+                if (event.type == SDL_FINGERDOWN) {
+                    touchOverlay.markTouchActive();
+                }
+                float kx = 0.0f;
+                float ky = 0.0f;
+                float kw = 0.0f;
+                float kh = 0.0f;
+                if (dx::extension::keypadScreenRect(kx, ky, kw, kh) &&
+                    touchOverlay.handleKeypadExitTouch(event, drawWidth, drawHeight, kx, ky, kw, kh, []() { dx::extension::closeKeypad(); })) {
+                    return;
+                }
                 float px = event.tfinger.x * static_cast<float>(drawWidth);
                 float py = event.tfinger.y * static_cast<float>(drawHeight);
                 if (event.type == SDL_FINGERDOWN) {
@@ -1477,7 +1489,7 @@ namespace {
                     if (touchOverlay.handleEditorPhysicalKey(event.key.keysym.sym, true)) {
                         break;
                     }
-                    if (event.key.keysym.sym != SDLK_VOLUMEUP && event.key.keysym.sym != SDLK_VOLUMEDOWN) {
+                    if (event.key.keysym.sym != SDLK_VOLUMEUP && event.key.keysym.sym != SDLK_VOLUMEDOWN && event.key.keysym.sym != SDLK_AC_BACK) {
                         touchOverlay.onPhysicalInput(touchCallbacks());
                     }
                     if (!event.key.repeat) {
@@ -1674,10 +1686,16 @@ namespace {
                 }
                 touchOverlay.setAugEntries(std::move(augs));
             }
+            float kx = 0.0f;
+            float ky = 0.0f;
+            float kw = 0.0f;
+            float kh = 0.0f;
+            bool keypadOpen = dx::extension::keypadScreenRect(kx, ky, kw, kh);
             touchOverlay.render(
                 renderer->canvas(),
                 dx::iequals(dx::config::language(), "ptb"),
-                dx::extension::wantsMouse() || dx::extension::isModalOpen());
+                dx::extension::wantsMouse() || dx::extension::isModalOpen(),
+                keypadOpen, kx, ky, kw, kh);
             perfOverlay.render(renderer->canvas(), width, height);
             renderer->endFrame();
         }
