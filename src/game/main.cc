@@ -13,6 +13,7 @@
 #include "engine/savegame.h"
 #include "engine/world.h"
 #include "extension/extension.h"
+#include "game/gyro_aim.h"
 #include "game/perf_overlay.h"
 #include "game/touch_overlay.h"
 #include "render/lighting.h"
@@ -31,6 +32,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -40,6 +42,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -237,6 +240,7 @@ namespace {
 
         ~Game()
         {
+            gyroAim.shutdown();
             closeController();
         }
 
@@ -418,6 +422,22 @@ namespace {
                   "Opens the visual Touch Layout Editor to move, resize, show, or hide each on-screen control.",
                   "Abre o Editor de Layout Touch para mover, redimensionar, mostrar ou ocultar cada botão.",
                   { "Open Editor", "Open Editor" }, { "Abrir Editor", "Abrir Editor" } },
+                { "DeusEx.MenuChoice_GyroAimMode", "|&Gyroscope Aim", "Mira |&Giroscópio",
+                  "Enables camera aiming with the device or controller gyroscope. Aim / Scope activates gyro while scoping or firing.",
+                  "Ativa a mira por movimento usando o giroscópio do aparelho ou controle. Ao Mirar ativa só com mira ou disparo.",
+                  { "Off", "Always On", "Aim / Scope" }, { "Desl.", "Sempre Lig.", "Ao Mirar" } },
+                { "DeusEx.MenuChoice_GyroSensitivity", "Gyro |&Sensitivity", "|&Sensib. Giroscópio",
+                  "Camera rotation speed from gyroscope motion.",
+                  "Velocidade de rotação da câmera pelo giroscópio.",
+                  { "0.5x", "0.75x", "1.0x", "1.5x", "2.0x", "3.0x" }, { "0.5x", "0.75x", "1.0x", "1.5x", "2.0x", "3.0x" } },
+                { "DeusEx.MenuChoice_GyroAxisMode", "Gyro |&Yaw Axis", "|&Eixo Horiz. Gyro",
+                  "Chooses horizontal turning motion. Auto uses gravity so turning works smoothly regardless of how tilted you hold the device.",
+                  "Escolhe o movimento horizontal. Auto usa gravidade para girar naturalmente independente da inclinação do aparelho.",
+                  { "Auto (Gravity)", "Yaw (Turn)", "Roll (Steer)" }, { "Auto (Gravid.)", "Girar (Yaw)", "Volante (Roll)" } },
+                { "DeusEx.MenuChoice_GyroInvertY", "|&Invert Gyro Y", "|&Inverter Y Gyro",
+                  "Inverts vertical pitch direction for gyroscope aiming.",
+                  "Inverte o eixo vertical da mira por giroscópio.",
+                  { "Off", "On" }, { "Desl.", "Lig." } },
                 { "DeusEx.MenuChoice_FieldOfView", "Field of |&View", "Campo de |&Visão",
                   "Horizontal field of view on a 4:3 screen. Wider screens show more at the sides.",
                   "Campo de visão horizontal em tela 4:3. Telas mais largas mostram mais nas laterais.",
@@ -626,15 +646,40 @@ namespace {
                 touchOverlay.openEditor();
             });
             addFixVanillaBugsChoice(gameplay, 7);
+            dx::UClass* gyroModeChoice = addChoice(
+                gameplay, 8, "DeusEx.MenuUIChoiceEnum", "MenuChoice_GyroAimMode", "|&Gyroscope Aim",
+                "Enables camera aiming with the device or controller gyroscope. Aim / Scope activates gyro while scoping or firing.",
+                "GyroAimMode", { "Off", "Always On", "Aim / Scope" }, 0, "0");
+            if (gyroModeChoice && gyroModeChoice->defaultObject) {
+                *reinterpret_cast<int32_t*>(gyroModeChoice->defaultObject->propertyAddress(dx::Name("defaultInfoWidth"))) = 140;
+            }
+            addEnumChoice(gameplay, 9, "MenuChoice_GyroSensitivity", "Gyro |&Sensitivity",
+                "Camera rotation speed from gyroscope motion.",
+                "GyroSensitivity", { "0.5x", "0.75x", "1.0x", "1.5x", "2.0x", "3.0x" }, 2);
+            dx::UClass* gyroAxisChoice = addChoice(
+                gameplay, 10, "DeusEx.MenuUIChoiceEnum", "MenuChoice_GyroAxisMode", "Gyro |&Yaw Axis",
+                "Chooses horizontal turning motion. Auto uses gravity so turning works smoothly regardless of how tilted you hold the device.",
+                "GyroAxisMode", { "Auto (Gravity)", "Yaw (Turn)", "Roll (Steer)" }, 0, "0");
+            if (gyroAxisChoice && gyroAxisChoice->defaultObject) {
+                *reinterpret_cast<int32_t*>(gyroAxisChoice->defaultObject->propertyAddress(dx::Name("defaultInfoWidth"))) = 140;
+            }
+            addEnumChoice(gameplay, 11, "MenuChoice_GyroInvertY", "|&Invert Gyro Y",
+                "Inverts vertical pitch direction for gyroscope aiming.",
+                "GyroInvertY", { "Off", "On" }, 0);
 
             dx::UObject* gameplayDefaults = gameplay->defaultObject;
             int gameplayGap = *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("choiceVerticalGap")));
-            int gameplayCut = 288 - 7 * gameplayGap;
-            if (gameplayCut > 0) {
-                dx::deusex::spliceMenuBackground(gameplayDefaults, 55, 55 + gameplayCut);
-                *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("ClientHeight"))) -= gameplayCut;
-                *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("helpPosY"))) -= gameplayCut;
+            int gameplaySliderRow = *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("choiceStartY"))) + 8 * gameplayGap;
+            int32_t& gameplayClientHeight = *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("ClientHeight")));
+            constexpr int gameplayExtraRows = 3;
+            dx::deusex::spliceMenuBackground(gameplayDefaults, gameplayClientHeight, *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("textureRows"))) * 256);
+            dx::deusex::spliceMenuBackground(gameplayDefaults, gameplaySliderRow, gameplaySliderRow + gameplayGap);
+            dx::deusex::spliceMenuBackground(gameplayDefaults, gameplaySliderRow, gameplaySliderRow - gameplayGap);
+            for (int i = 0; i < gameplayExtraRows; i++) {
+                dx::deusex::spliceMenuBackground(gameplayDefaults, gameplaySliderRow + gameplayGap, gameplaySliderRow);
             }
+            gameplayClientHeight += gameplayExtraRows * gameplayGap;
+            *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("helpPosY"))) += gameplayExtraRows * gameplayGap;
 
             syncExtraMenusLocalization();
             if (hasDxControllerMenu) {
@@ -730,8 +775,17 @@ namespace {
             dx::extension::setUIScale(kUIScaleValues[std::clamp(videoSetting("UIScale", 0), 0, 11)]);
             perfOverlay.setMode(static_cast<game::PerfOverlayMode>(std::clamp(videoSetting("PerformanceHUD", 0), 0, 2)));
             applyTouchOptions();
+            applyGyroOptions();
+            constexpr int kFrameLimits[] = { 0, 30, 60, 75, 120, 144, 165, 240 };
+            appliedFrameRateLimit = kFrameLimits[std::clamp(videoSetting("FrameRateLimit", 0), 0, 7)];
             if (browser || options.frames >= 0) {
                 return;
+            }
+            if (appliedVSync == -1) {
+                SDL_DisplayMode mode {};
+                if (SDL_GetCurrentDisplayMode(0, &mode) == 0 && mode.refresh_rate >= 30 && mode.refresh_rate <= 240) {
+                    displayRefreshRate = mode.refresh_rate;
+                }
             }
             int vsync = std::clamp(videoSetting("VSync", 1), 0, 2);
             if (vsync != appliedVSync) {
@@ -744,24 +798,33 @@ namespace {
 
         void limitFrameRate()
         {
-            const int limits[] = { 0, 30, 60, 75, 120, 144, 165, 240 };
-            int limit = limits[std::clamp(videoSetting("FrameRateLimit", 0), 0, 7)];
-            if (browser || limit == 0 || options.frames >= 0) {
+            if (browser || options.frames >= 0 || benchFrames > 0) {
+                frameDeadline = 0;
                 return;
             }
-            uint64_t frequency = SDL_GetPerformanceFrequency();
-            uint64_t deadline = frameDeadline + frequency / static_cast<uint64_t>(limit);
-            uint64_t now = SDL_GetPerformanceCounter();
+            int limit = appliedFrameRateLimit;
+            if (limit == 0 && appliedVSync == 0 && guiMode) {
+                limit = displayRefreshRate;
+            }
+            if (limit <= 0) {
+                frameDeadline = 0;
+                return;
+            }
+            const uint64_t frequency = SDL_GetPerformanceFrequency();
+            const uint64_t frameTicks = frequency / static_cast<uint64_t>(limit);
+            const uint64_t now = SDL_GetPerformanceCounter();
+            if (frameDeadline == 0) {
+                frameDeadline = now;
+                return;
+            }
+            const uint64_t deadline = frameDeadline + frameTicks;
             if (now >= deadline) {
                 frameDeadline = now;
                 return;
             }
-            while (now < deadline) {
-                uint64_t remaining = (deadline - now) * 1000 / frequency;
-                if (remaining > 1) {
-                    SDL_Delay(static_cast<uint32_t>(remaining - 1));
-                }
-                now = SDL_GetPerformanceCounter();
+            const uint64_t remainUs = ((deadline - now) * 1000000ULL) / frequency;
+            if (remainUs > 0) {
+                std::this_thread::sleep_for(std::chrono::microseconds(static_cast<int64_t>(remainUs)));
             }
             frameDeadline = deadline;
         }
@@ -891,9 +954,11 @@ namespace {
             dx::deusex::registerUiTextTranslator();
             addFieldOfViewChoice();
             addExtraOptions();
+            gyroAim.initialize();
             initControllers();
             touchOverlay.load(videoSection());
             applyTouchOptions();
+            applyGyroOptions();
             std::string map = options.map;
             std::filesystem::path mapFile = map;
             if (mapFile.has_parent_path() && std::filesystem::is_regular_file(mapFile)) {
@@ -1123,6 +1188,7 @@ namespace {
 
         void closeController()
         {
+            gyroAim.setController(nullptr);
             if (controller) {
                 SDL_GameControllerClose(controller);
                 controller = nullptr;
@@ -1182,6 +1248,7 @@ namespace {
             controller = opened;
             controllerId = jid;
             updateGamepadInfo();
+            gyroAim.setController(controller);
         }
 
         void openControllerById(SDL_JoystickID jid)
@@ -1255,6 +1322,48 @@ namespace {
             ts.scale = scales[std::clamp(videoSetting("TouchOverlayScale", 1), 0, 3)];
             ts.lookSensitivity = lookSens[std::clamp(videoSetting("TouchLookSensitivity", 2), 0, 4)];
             touchOverlay.setSettings(ts);
+        }
+
+        void applyGyroOptions()
+        {
+            static constexpr float gyroSens[] = { 0.50f, 0.75f, 1.00f, 1.50f, 2.00f, 3.00f };
+            game::GyroSettings gs;
+            gs.mode = static_cast<game::GyroAimMode>(std::clamp(videoSetting("GyroAimMode", 0), 0, 2));
+            gs.sensitivity = gyroSens[std::clamp(videoSetting("GyroSensitivity", 2), 0, 5)];
+            gs.axis = static_cast<game::GyroAxisMode>(std::clamp(videoSetting("GyroAxisMode", 0), 0, 2));
+            gs.invertY = videoSetting("GyroInvertY", 0) != 0;
+            gyroAim.setSettings(gs);
+        }
+
+        void pollGyro(bool gui)
+        {
+            if (gyroAim.settings().mode != game::GyroAimMode::Off && (++gyroRotationPollCounter % 30) == 0) {
+                gyroAim.refreshDisplayRotation();
+            }
+
+            dx::UObject* player = (world && !inBackground) ? world->player() : nullptr;
+            bool allow = false;
+            if (player && !player->destroyed && dx::isPlayerPawn(player) && !gui && !dx::actor::bInterpolating(player)
+                && dx::vm::stateName(player) != dx::Name("Interpolating")) {
+                float defFov = dx::playerpawn::DefaultFOV(player);
+                float curFov = dx::pawn::FovAngle(player);
+                float desFov = dx::playerpawn::DesiredFOV(player);
+                bool scoped = defFov > 1.0f && (curFov < defFov - 1.0f || desFov < defFov - 1.0f);
+                bool aiming = scoped || prevLeftTrigger > 0.0f || touchOverlay.isFireHeld();
+                allow = gyroAim.settings().mode == game::GyroAimMode::AlwaysOn || aiming;
+            }
+
+            game::GyroDelta gd = gyroAim.poll(allow);
+            if (!allow || (gd.yawRad == 0.0f && gd.pitchRad == 0.0f)) {
+                return;
+            }
+
+            constexpr float kBaseMouseUnitsPerRadian = 905.4f;
+            float mouseSens = std::max(0.25f, dx::playerpawn::MouseSensitivity(player));
+            float normScale = (3.0f / mouseSens) * kBaseMouseUnitsPerRadian;
+            float pitchSign = dx::playerpawn::bInvertMouse(player) ? -1.0f : 1.0f;
+            dx::console::key(dx::IK_MouseX, dx::IST_Axis, gd.yawRad * normScale);
+            dx::console::key(dx::IK_MouseY, dx::IST_Axis, gd.pitchRad * normScale * pitchSign);
         }
 
         void resetTouchControls()
@@ -1458,12 +1567,34 @@ namespace {
                     running = false;
                     break;
                 case SDL_APP_WILLENTERBACKGROUND:
+                    inBackground = true;
+                    gyroAim.setSuspended(true);
                     dx::audio::suspend();
                     dx::config::system().save();
                     dx::config::user().save();
                     break;
                 case SDL_APP_DIDENTERFOREGROUND:
+                    inBackground = false;
+                    last = SDL_GetPerformanceCounter();
+                    frameDeadline = 0;
+                    gyroAim.setSuspended(false);
+                    gyroAim.refreshDisplayRotation();
                     dx::audio::resume();
+                    break;
+                case SDL_WINDOWEVENT:
+                    if (event.window.event == SDL_WINDOWEVENT_RESIZED || event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+                        gyroAim.refreshDisplayRotation();
+                    }
+                    break;
+                case SDL_DISPLAYEVENT:
+                    if (event.display.event == SDL_DISPLAYEVENT_ORIENTATION) {
+                        gyroAim.refreshDisplayRotation();
+                    }
+                    break;
+                case SDL_CONTROLLERSENSORUPDATE:
+                    if (controller && event.csensor.which == controllerId) {
+                        gyroAim.handleControllerSensorEvent(event.csensor);
+                    }
                     break;
                 case SDL_CONTROLLERDEVICEADDED:
                     if (!controller) {
@@ -1768,6 +1899,53 @@ namespace {
                 int modeVal = std::clamp(std::atoi(rest.c_str()), 0, 2);
                 dx::config::system().set(videoSection(), "PerformanceHUD", std::to_string(modeVal));
                 perfOverlay.setMode(static_cast<game::PerfOverlayMode>(modeVal));
+            } else if (verb == "gyro") {
+                char sub[32] = {};
+                int val = 0;
+                int parsed = std::sscanf(rest.c_str(), "%31s %d", sub, &val);
+                if (parsed >= 2) {
+                    if (std::strcmp(sub, "mode") == 0) {
+                        dx::config::system().set(videoSection(), "GyroAimMode", std::to_string(std::clamp(val, 0, 2)));
+                        applyGyroOptions();
+                    } else if (std::strcmp(sub, "sens") == 0) {
+                        dx::config::system().set(videoSection(), "GyroSensitivity", std::to_string(std::clamp(val, 0, 5)));
+                        applyGyroOptions();
+                    } else if (std::strcmp(sub, "axis") == 0) {
+                        dx::config::system().set(videoSection(), "GyroAxisMode", std::to_string(std::clamp(val, 0, 2)));
+                        applyGyroOptions();
+                    } else if (std::strcmp(sub, "inv") == 0) {
+                        dx::config::system().set(videoSection(), "GyroInvertY", std::to_string(val != 0 ? 1 : 0));
+                        applyGyroOptions();
+                    }
+                }
+                game::GyroDebugInfo gi = gyroAim.debugInfo();
+                const game::GyroSettings& gs = gyroAim.settings();
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "OpenDE_Gyro: status backend=%s enabled=%d mode=%d sens=%.2f axis=%d invY=%d rot=%d gyro='%s' grav='%s'(fb=%d,has=%d) samples=%llu/%llu raw=[%.4f,%.4f,%.4f] bias=[%.4f,%.4f,%.4f] up=[%.3f,%.3f,%.3f] out=[%.5f,%.5f]",
+                    gi.backend.c_str(),
+                    gi.enabled ? 1 : 0,
+                    static_cast<int>(gs.mode),
+                    static_cast<double>(gs.sensitivity),
+                    static_cast<int>(gs.axis),
+                    gs.invertY ? 1 : 0,
+                    gi.displayRotation,
+                    gi.gyroSensorName.c_str(),
+                    gi.gravitySensorName.c_str(),
+                    gi.usingGravityFallbackAccel ? 1 : 0,
+                    gi.hasGravitySample ? 1 : 0,
+                    static_cast<unsigned long long>(gi.gyroSamples),
+                    static_cast<unsigned long long>(gi.gravitySamples),
+                    static_cast<double>(gi.lastScreenGyro[0]),
+                    static_cast<double>(gi.lastScreenGyro[1]),
+                    static_cast<double>(gi.lastScreenGyro[2]),
+                    static_cast<double>(gi.lastBias[0]),
+                    static_cast<double>(gi.lastBias[1]),
+                    static_cast<double>(gi.lastBias[2]),
+                    static_cast<double>(gi.upVec[0]),
+                    static_cast<double>(gi.upVec[1]),
+                    static_cast<double>(gi.upVec[2]),
+                    static_cast<double>(gi.lastOutputYawRad),
+                    static_cast<double>(gi.lastOutputPitchRad));
             } else if (verb == "state") {
                 dx::UObject* player = world ? world->player() : nullptr;
                 if (player) {
@@ -1839,6 +2017,7 @@ namespace {
             dx::UObject* player = world ? world->player() : nullptr;
             dx::Vector loc = player ? dx::actor::Location(player) : dx::Vector{0.0f, 0.0f, 0.0f};
             int yaw = player ? (dx::actor::Rotation(player).yaw & 65535) : 0;
+            int pitch = player ? (dx::pawn::ViewRotation(player).pitch & 65535) : 0;
             int health = player ? dx::pawn::Health(player) : 0;
             std::string pState = player ? dx::vm::stateName(player).c_str() : "";
             std::string lang = dx::config::system().get("Engine.Engine", "Language").value_or("int");
@@ -1848,7 +2027,7 @@ namespace {
             std::snprintf(
                 jsonBuf,
                 sizeof(jsonBuf),
-                "{\"frame\":%d,\"fps\":%.1f,\"tickMs\":%.2f,\"renderMs\":%.2f,\"swapMs\":%.2f,\"res\":[%d,%d],\"wantsMouse\":%s,\"touchEditor\":%s,\"lang\":\"%s\",\"hasPlayer\":%s,\"pos\":[%.1f,%.1f,%.1f],\"yaw\":%d,\"health\":%d,\"playerState\":\"%s\",\"execOut\":\"%s\"}\n",
+                "{\"frame\":%d,\"fps\":%.1f,\"tickMs\":%.2f,\"renderMs\":%.2f,\"swapMs\":%.2f,\"res\":[%d,%d],\"wantsMouse\":%s,\"touchEditor\":%s,\"lang\":\"%s\",\"hasPlayer\":%s,\"pos\":[%.1f,%.1f,%.1f],\"yaw\":%d,\"pitch\":%d,\"health\":%d,\"playerState\":\"%s\",\"execOut\":\"%s\"}\n",
                 frame,
                 static_cast<double>(fps),
                 static_cast<double>(profTickMs),
@@ -1864,6 +2043,7 @@ namespace {
                 static_cast<double>(loc.y),
                 static_cast<double>(loc.z),
                 yaw,
+                pitch,
                 health,
                 pState.c_str(),
                 lastExecOut.c_str()
@@ -1989,6 +2169,10 @@ namespace {
         void step()
         {
             processEvents();
+            if (inBackground) {
+                SDL_Delay(50);
+                return;
+            }
             uint64_t now = SDL_GetPerformanceCounter();
             float delta = static_cast<float>(now - last) / static_cast<float>(SDL_GetPerformanceFrequency());
             last = now;
@@ -2031,6 +2215,7 @@ namespace {
                 applyRenderOptions();
                 cachedBrightness = static_cast<float>(std::atof(dx::config::system().get(videoSection(), "Brightness").value_or("0.5").c_str()));
             }
+            pollGyro(gui);
             const double perfFreqMs = static_cast<double>(SDL_GetPerformanceFrequency()) / 1000.0;
             uint64_t tTick0 = SDL_GetPerformanceCounter();
             {
@@ -2245,10 +2430,15 @@ namespace {
         bool lastInputWasGamepad = false;
         game::TouchOverlayManager touchOverlay;
         game::PerfOverlay perfOverlay;
+        game::GyroAim gyroAim;
+        int gyroRotationPollCounter = 0;
         uint64_t perfLastSwap = 0;
         dx::UClass* touchEditorChoiceClass = nullptr;
         float appliedPlayerSpeed = 1.0f;
         int appliedVSync = -1;
+        bool inBackground = false;
+        int appliedFrameRateLimit = 0;
+        int displayRefreshRate = 60;
         uint64_t frameDeadline = 0;
         float profTickMs = 0.0f;
         float profRenderMs = 0.0f;
@@ -2261,10 +2451,15 @@ int main(int argc, char** argv)
 {
     Options options = parseOptions(argc, argv);
     SDL_SetHint(SDL_HINT_TOUCH_MOUSE_EVENTS, "0");
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) {
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
-            std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
-            return 1;
+#ifdef __ANDROID__
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+#endif
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_SENSOR) != 0) {
+        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) {
+            if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+                std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+                return 1;
+            }
         }
     }
 #if defined(__EMSCRIPTEN__) || defined(__ANDROID__)

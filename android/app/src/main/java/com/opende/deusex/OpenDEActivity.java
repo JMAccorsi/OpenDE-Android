@@ -1,6 +1,11 @@
 package com.opende.deusex;
 
+import android.app.Activity;
+import android.content.pm.ActivityInfo;
+import android.os.Build;
 import android.os.Bundle;
+import android.view.Display;
+import android.view.Surface;
 
 import org.libsdl.app.SDLActivity;
 
@@ -42,5 +47,25 @@ public class OpenDEActivity extends SDLActivity {
     protected void onResume() {
         super.onResume();
         OverlayInstaller.ensureInstalled(this);
+    }
+
+    @Override
+    public void setOrientationBis(int w, int h, boolean resizable, String hint) {
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+    }
+
+    @SuppressWarnings("deprecation")
+    public static int getDisplayRotation() {
+        Activity activity = getContext() instanceof Activity ? (Activity) getContext() : null;
+        if (activity == null) {
+            return Surface.ROTATION_90;
+        }
+        Display display = null;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display = activity.getDisplay();
+        } else if (activity.getWindowManager() != null) {
+            display = activity.getWindowManager().getDefaultDisplay();
+        }
+        return display != null ? display.getRotation() : Surface.ROTATION_90;
     }
 }

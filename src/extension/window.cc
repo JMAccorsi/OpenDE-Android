@@ -180,12 +180,41 @@ namespace dx::extension {
 
     float virtualScale()
     {
+#ifdef __ANDROID__
+        float baseScale = state().uiScale > 0.0f
+            ? state().uiScale
+            : std::max(1.0f, std::floor((fittedHeight() / 480.0f) * 4.0f) / 4.0f);
+        if (URootWindow* rootWin = state().root; rootWin && !rootWin->destroyed) {
+            if (UWindow* modal = rootWin->topModal(); modal && modal != rootWin && !modal->destroyed) {
+                auto maxModalClientHeight = [](auto& self, UWindow* modalWin, int depth) -> int32_t {
+                    if (!modalWin || modalWin->destroyed || !modalWin->visible() || depth > 2) {
+                        return 0;
+                    }
+                    int32_t best = 0;
+                    if (modalWin->cls) {
+                        static const Name nameClientHeight("ClientHeight");
+                        if (UProperty* prop = modalWin->cls->findProperty(nameClientHeight); prop && prop->type == PropType::Int) {
+                            best = std::max(best, *reinterpret_cast<const int32_t*>(modalWin->data + prop->offset));
+                        }
+                    }
+                    for (UWindow* modalChild = modalWin->firstChild(); modalChild; modalChild = modalChild->nextSibling()) {
+                        best = std::max(best, self(self, modalChild, depth + 1));
+                    }
+                    return best;
+                };
+                int32_t clientH = maxModalClientHeight(maxModalClientHeight, modal, 0);
+                if (clientH > 0) {
+                    float neededH = static_cast<float>(clientH) + 96.0f;
+                    float fitScale = std::max(1.0f, std::floor((fittedHeight() / neededH) * 4.0f) / 4.0f);
+                    baseScale = std::min(baseScale, fitScale);
+                }
+            }
+        }
+        return baseScale;
+#else
         if (state().uiScale > 0.0f) {
             return state().uiScale;
         }
-#ifdef __ANDROID__
-        return std::max(1.0f, std::floor((fittedHeight() / 480.0f) * 4.0f) / 4.0f);
-#else
         return std::max(std::floor(fittedHeight() / 600.0f), 1.0f);
 #endif
     }

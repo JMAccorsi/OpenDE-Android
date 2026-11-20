@@ -3,7 +3,11 @@ package com.opende.deusex;
 import android.Manifest;
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
 import android.graphics.Bitmap;
 import android.graphics.Color;
@@ -21,7 +25,10 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
+import android.widget.ScrollView;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.File;
 import java.util.Locale;
@@ -51,6 +58,14 @@ public class BootActivity extends Activity {
     private Button secondaryBtn;
     private Button tertiaryBtn;
     private Button steamBtn;
+    private Button updateBtn;
+
+    private boolean autoUpdateChecked = false;
+    private boolean updateCheckRunning = false;
+    private File pendingApk;
+    private BroadcastReceiver installReceiver;
+    private AlertDialog updateProgressDialog;
+    private java.util.concurrent.atomic.AtomicBoolean updateCancel;
 
     private boolean isPt() {
         String lang = Locale.getDefault().getLanguage();
@@ -66,6 +81,11 @@ public class BootActivity extends Activity {
     @Override
     protected void onResume() {
         super.onResume();
+        if (pendingApk != null && UpdateChecker.canInstallPackages(this)) {
+            File apk = pendingApk;
+            pendingApk = null;
+            startInstall(apk);
+        }
         if (!launched && !scanning) {
             evaluateAndProceed();
         }
@@ -75,6 +95,16 @@ public class BootActivity extends Activity {
     protected void onDestroy() {
         super.onDestroy();
         executor.shutdownNow();
+        if (updateCancel != null) {
+            updateCancel.set(true);
+        }
+        if (installReceiver != null) {
+            try {
+                unregisterReceiver(installReceiver);
+            } catch (IllegalArgumentException ignored) {
+            }
+            installReceiver = null;
+        }
     }
 
     private void buildUi() {
@@ -213,6 +243,15 @@ public class BootActivity extends Activity {
             0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
         btnRow.addView(tertiaryBtn, secLp3);
 
+        updateBtn = makeButton("#1B1E23", "#2A2F36", "#4A5058", "#9AA3AD", false);
+        updateBtn.setVisibility(View.GONE);
+        LinearLayout.LayoutParams updLp = new LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        updLp.topMargin = dp(10);
+        inner.addView(updateBtn, updLp);
+
         setContentView(root);
     }
 
@@ -242,6 +281,9 @@ public class BootActivity extends Activity {
     }
 
     private void evaluateAndProceed() {
+        if (updateBtn != null) {
+            updateBtn.setVisibility(View.GONE);
+        }
         File fastPrivate = GameLocator.findPrivateGameRoot(this);
         if (fastPrivate != null) {
             showLauncherHub(fastPrivate);
@@ -263,6 +305,9 @@ public class BootActivity extends Activity {
     }
 
     private void showPermissionPrompt() {
+        if (updateBtn != null) {
+            updateBtn.setVisibility(View.GONE);
+        }
         boolean pt = isPt();
         titleView.setText("OpenDE - Deus Ex");
         bodyView.setText(pt
@@ -307,6 +352,9 @@ public class BootActivity extends Activity {
     }
 
     private void startAutoScan() {
+        if (updateBtn != null) {
+            updateBtn.setVisibility(View.GONE);
+        }
         scanning = true;
         boolean pt = isPt();
         titleView.setText(pt ? "Procurando Deus Ex..." : "Searching for Deus Ex...");
@@ -341,6 +389,9 @@ public class BootActivity extends Activity {
     }
 
     private void showInstallerFoundPrompt(File installer) {
+        if (updateBtn != null) {
+            updateBtn.setVisibility(View.GONE);
+        }
         boolean pt = isPt();
         double mb = installer.length() / (1024.0 * 1024.0);
         titleView.setText(pt ? "Instalador GOG Encontrado!" : "GOG Installer Found!");
@@ -367,6 +418,9 @@ public class BootActivity extends Activity {
     }
 
     private void showNotFoundPrompt(String customMessage) {
+        if (updateBtn != null) {
+            updateBtn.setVisibility(View.GONE);
+        }
         boolean pt = isPt();
         titleView.setText(pt ? "Deus Ex não encontrado" : "Deus Ex Not Found");
         if (customMessage != null) {
@@ -730,6 +784,225 @@ public class BootActivity extends Activity {
         tertiaryBtn.setEnabled(true);
         tertiaryBtn.setText(pt ? "Pasta de Mod" : "Mod Folder");
         tertiaryBtn.setOnClickListener(v -> openModFolderPicker());
+
+        setupUpdateButton();
+    }
+
+    // ---- Auto-update (GitHub Releases) ----
+
+    private void setupUpdateButton() {
+        updateBtn.setVisibility(View.VISIBLE);
+        refreshUpdateButtonLabel();
+        updateBtn.setOnClickListener(v -> checkForUpdates(true));
+        if (!autoUpdateChecked) {
+            autoUpdateChecked = true;
+            if (UpdateChecker.shouldAutoCheck(this)) {
+                checkForUpdates(false);
+            }
+        }
+    }
+
+    private void refreshUpdateButtonLabel() {
+        updateBtn.setEnabled(!updateCheckRunning);
+        updateBtn.setText((isPt() ? "Buscar atualizações" : "Check for updates")
+            + "  (v" + UpdateChecker.currentVersionName(this) + ")");
+    }
+
+    private void checkForUpdates(boolean manual) {
+        if (updateCheckRunning) {
+            return;
+        }
+        boolean pt = isPt();
+        updateCheckRunning = true;
+        if (manual) {
+            updateBtn.setEnabled(false);
+            updateBtn.setText(pt ? "Verificando..." : "Checking...");
+        }
+        UpdateChecker.check(this, manual, (release, error) -> {
+            updateCheckRunning = false;
+            if (isFinishing() || isDestroyed()) {
+                return;
+            }
+            if (updateBtn.getVisibility() == View.VISIBLE) {
+                refreshUpdateButtonLabel();
+            }
+            if (error != null) {
+                if (manual) {
+                    Toast.makeText(this, (pt ? "Falha ao verificar atualizações: " : "Update check failed: ") + error, Toast.LENGTH_LONG).show();
+                }
+            } else if (release == null) {
+                if (manual) {
+                    Toast.makeText(this, pt ? "Você já está na versão mais recente." : "You are already on the latest version.", Toast.LENGTH_SHORT).show();
+                }
+            } else {
+                showUpdateDialog(release);
+            }
+        });
+    }
+
+    private void showUpdateDialog(UpdateChecker.Release release) {
+        boolean pt = isPt();
+        String notes = release.notes == null ? "" : release.notes.trim()
+            .replace("**", "")
+            .replace("`", "")
+            .replaceAll("(?m)^#{1,6}\\s*", "");
+        if (notes.length() > 450) {
+            notes = notes.substring(0, 450).trim() + "...";
+        }
+        String sizeText = release.size > 0 ? String.format(Locale.ROOT, " (%.1f MB)", release.size / (1024.0 * 1024.0)) : "";
+        String header = (pt ? "Nova versão: " : "New version: ") + release.tag + sizeText
+            + "\n" + (pt ? "Instalada: v" : "Installed: v") + UpdateChecker.currentVersionName(this);
+
+        LinearLayout container = new LinearLayout(this);
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(dp(20), dp(12), dp(20), dp(4));
+
+        TextView headView = new TextView(this);
+        headView.setText(header);
+        headView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
+        headView.setTypeface(Typeface.DEFAULT_BOLD);
+        container.addView(headView);
+
+        if (!notes.isEmpty()) {
+            ScrollView scroll = new ScrollView(this);
+            LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, dp(130));
+            scLp.topMargin = dp(8);
+            TextView notesView = new TextView(this);
+            notesView.setText(notes);
+            notesView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
+            scroll.addView(notesView);
+            container.addView(scroll, scLp);
+        }
+
+        new AlertDialog.Builder(this)
+            .setTitle(pt ? "Atualização do OpenDE" : "OpenDE Update")
+            .setView(container)
+            .setPositiveButton(pt ? "Atualizar agora" : "Update now", (d, w) -> startUpdateDownload(release))
+            .setNegativeButton(pt ? "Depois" : "Later", null)
+            .setNeutralButton(pt ? "Ignorar versão" : "Skip version", (d, w) -> UpdateChecker.skipVersion(this, release.tag))
+            .show();
+    }
+
+    private void startUpdateDownload(UpdateChecker.Release release) {
+        boolean pt = isPt();
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(24), dp(16), dp(24), dp(8));
+        TextView label = new TextView(this);
+        label.setText(pt ? "Baixando " + release.tag + "..." : "Downloading " + release.tag + "...");
+        box.addView(label);
+        ProgressBar bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+        bar.setMax(1000);
+        bar.setIndeterminate(true);
+        box.addView(bar, new LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+        updateProgressDialog = new AlertDialog.Builder(this)
+            .setTitle(pt ? "Atualizando OpenDE" : "Updating OpenDE")
+            .setView(box)
+            .setCancelable(false)
+            .setNegativeButton(pt ? "Cancelar" : "Cancel", (d, w) -> {
+                if (updateCancel != null) {
+                    updateCancel.set(true);
+                }
+            })
+            .show();
+        updateCancel = UpdateChecker.download(this, release, new UpdateChecker.DownloadCallback() {
+            @Override
+            public void onProgress(long done, long total) {
+                if (total > 0) {
+                    bar.setIndeterminate(false);
+                    bar.setProgress((int) (done * 1000L / total));
+                    label.setText(String.format(Locale.ROOT, "%s %s  %.1f / %.1f MB", pt ? "Baixando" : "Downloading",
+                        release.tag, done / (1024.0 * 1024.0), total / (1024.0 * 1024.0)));
+                }
+            }
+
+            @Override
+            public void onDone(File apk) {
+                dismissUpdateProgress();
+                if (!isFinishing() && !isDestroyed()) {
+                    beginInstall(apk);
+                }
+            }
+
+            @Override
+            public void onError(String message) {
+                dismissUpdateProgress();
+                if (!isFinishing() && !isDestroyed() && !"cancelled".equals(message)) {
+                    Toast.makeText(BootActivity.this, (pt ? "Falha no download: " : "Download failed: ") + message, Toast.LENGTH_LONG).show();
+                }
+            }
+        });
+    }
+
+    private void dismissUpdateProgress() {
+        if (updateProgressDialog != null) {
+            try {
+                updateProgressDialog.dismiss();
+            } catch (IllegalArgumentException ignored) {
+            }
+            updateProgressDialog = null;
+        }
+    }
+
+    private void beginInstall(File apk) {
+        boolean pt = isPt();
+        if (!UpdateChecker.canInstallPackages(this)) {
+            pendingApk = apk;
+            new AlertDialog.Builder(this)
+                .setTitle(pt ? "Permissão necessária" : "Permission required")
+                .setMessage(pt
+                    ? "Para instalar a atualização, permita que o OpenDE instale apps desta fonte e volte para cá."
+                    : "To install the update, allow OpenDE to install apps from this source, then come back.")
+                .setPositiveButton(pt ? "Abrir ajustes" : "Open settings", (d, w) -> {
+                    Intent intent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:" + getPackageName()));
+                    startActivity(intent);
+                })
+                .setNegativeButton(pt ? "Cancelar" : "Cancel", (d, w) -> pendingApk = null)
+                .setCancelable(false)
+                .show();
+            return;
+        }
+        startInstall(apk);
+    }
+
+    private void startInstall(File apk) {
+        boolean pt = isPt();
+        registerInstallReceiver();
+        try {
+            UpdateChecker.install(this, apk);
+        } catch (Exception e) {
+            Toast.makeText(this, (pt ? "Falha ao instalar: " : "Install failed: ") + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private void registerInstallReceiver() {
+        if (installReceiver != null) {
+            return;
+        }
+        installReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                int status = intent.getIntExtra(PackageInstaller.EXTRA_STATUS, PackageInstaller.STATUS_FAILURE);
+                if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
+                    Intent confirm = intent.getParcelableExtra(Intent.EXTRA_INTENT);
+                    if (confirm != null) {
+                        confirm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(confirm);
+                    }
+                } else if (status != PackageInstaller.STATUS_SUCCESS) {
+                    String msg = intent.getStringExtra(PackageInstaller.EXTRA_STATUS_MESSAGE);
+                    Toast.makeText(context, (isPt() ? "Instalação não concluída: " : "Install not completed: ") + (msg == null ? status : msg), Toast.LENGTH_LONG).show();
+                }
+            }
+        };
+        IntentFilter filter = new IntentFilter(UpdateChecker.ACTION_INSTALL_STATUS);
+        if (Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(installReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+        } else {
+            registerReceiver(installReceiver, filter);
+        }
     }
 
     private void showModSelectorDialog(File gameRoot) {

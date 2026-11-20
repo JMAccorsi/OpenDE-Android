@@ -84,6 +84,7 @@ namespace game {
         bool isVisible() const { return visible_; }
         bool isEditorOpen() const { return editorOpen_; }
         bool isAugDrawerOpen() const { return augDrawerOpen_; }
+        bool isFireHeld() const { return buttons_[static_cast<size_t>(TouchControlId::Fire)].active; }
         void setAugEntries(std::vector<TouchAugEntry> entries) { augEntries_ = std::move(entries); }
         void openEditor();
         void closeEditor(bool saveChanges);

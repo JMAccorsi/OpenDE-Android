@@ -2648,13 +2648,10 @@ namespace dx {
         bool lastCull = false;
         for (const TransDraw& d : draws) {
             if (!d.extra.lightmap) {
-                if (!hasState || d.flags != lastFlags || lastShaderFlags != 0) {
-                    applyBlend(d.flags, 0);
+                if (!hasState || d.flags != lastFlags || lastShaderFlags != 0 || lastCull) {
+                    applyBlend(d.flags | PF_TwoSided, 0);
                     lastFlags = d.flags;
                     lastShaderFlags = 0;
-                }
-                if (!hasState || lastCull) {
-                    device->setCulling(false);
                     lastCull = false;
                 }
                 if (!hasState || d.texture != lastTexture) {
@@ -2687,13 +2684,10 @@ namespace dx {
                 device->bindTexture(d.texture);
                 lastTexture = d.texture;
             }
-            if (!hasState || d.flags != lastFlags || shaderFlags != lastShaderFlags) {
-                applyBlend(d.flags, shaderFlags);
+            if (!hasState || d.flags != lastFlags || shaderFlags != lastShaderFlags || d.extra.cull != lastCull) {
+                applyBlend(d.extra.cull ? (d.flags & ~PF_TwoSided) : (d.flags | PF_TwoSided), shaderFlags);
                 lastFlags = d.flags;
                 lastShaderFlags = shaderFlags;
-            }
-            if (!hasState || d.extra.cull != lastCull) {
-                device->setCulling(d.extra.cull);
                 lastCull = d.extra.cull;
             }
             hasState = true;
@@ -2845,13 +2839,10 @@ namespace dx {
         bool lastCull = false;
         for (const BatchDraw& d : draws) {
             if (!d.extra.lightmap) {
-                if (!hasState || d.flags != lastFlags || lastShaderFlags != 0) {
-                    applyBlend(d.flags, 0);
+                if (!hasState || d.flags != lastFlags || lastShaderFlags != 0 || lastCull) {
+                    applyBlend(d.flags | PF_TwoSided, 0);
                     lastFlags = d.flags;
                     lastShaderFlags = 0;
-                }
-                if (!hasState || lastCull) {
-                    device->setCulling(false);
                     lastCull = false;
                 }
                 if (!hasState || d.texture != lastTexture) {
@@ -2884,13 +2875,10 @@ namespace dx {
                 device->bindTexture(d.texture);
                 lastTexture = d.texture;
             }
-            if (!hasState || d.flags != lastFlags || shaderFlags != lastShaderFlags) {
-                applyBlend(d.flags, shaderFlags);
+            if (!hasState || d.flags != lastFlags || shaderFlags != lastShaderFlags || d.extra.cull != lastCull) {
+                applyBlend(d.extra.cull ? (d.flags & ~PF_TwoSided) : (d.flags | PF_TwoSided), shaderFlags);
                 lastFlags = d.flags;
                 lastShaderFlags = shaderFlags;
-            }
-            if (!hasState || d.extra.cull != lastCull) {
-                device->setCulling(d.extra.cull);
                 lastCull = d.extra.cull;
             }
             hasState = true;
