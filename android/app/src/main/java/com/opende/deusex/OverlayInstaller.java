@@ -35,7 +35,8 @@ final class OverlayInstaller {
 
         String currentStamp = computeBuildStamp(context);
         File stampFile = new File(systemDir, STAMP_FILE);
-        if (isUpToDate(systemDir, stampFile, currentStamp)) {
+        File dxLauncherFontsDir = new File(ext, "dxlauncher/fonts");
+        if (isUpToDate(systemDir, dxLauncherFontsDir, stampFile, currentStamp)) {
             return;
         }
 
@@ -44,6 +45,7 @@ final class OverlayInstaller {
         ok &= installAsset(assets, "dxcontroller/DXController.u", new File(systemDir, "DXController.u"));
         ok &= installAsset(assets, "dxcontroller/DeusEx.u", new File(systemDir, "DeusEx.u"));
         ok &= installAssetDir(assets, "ptb", new File(systemDir, "ptb"));
+        ok &= installAssetDir(assets, "dxlauncher/fonts", dxLauncherFontsDir);
 
         if (ok) {
             writeStamp(stampFile, currentStamp);
@@ -59,11 +61,13 @@ final class OverlayInstaller {
         }
     }
 
-    private static boolean isUpToDate(File systemDir, File stampFile, String expectedStamp) {
+    private static boolean isUpToDate(File systemDir, File dxLauncherFontsDir, File stampFile, String expectedStamp) {
         if (!stampFile.isFile()
             || !new File(systemDir, "DXController.u").isFile()
             || !new File(systemDir, "DeusEx.u").isFile()
-            || !new File(systemDir, "ptb/DeusEx.int").isFile()) {
+            || !new File(systemDir, "ptb/DeusEx.int").isFile()
+            || !new File(dxLauncherFontsDir, "BarlowSemiCondensed-Regular.ttf").isFile()
+            || !new File(dxLauncherFontsDir, "ShareTechMono-Regular.ttf").isFile()) {
             return false;
         }
         try (BufferedReader reader = new BufferedReader(new InputStreamReader(new FileInputStream(stampFile), StandardCharsets.UTF_8))) {

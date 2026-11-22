@@ -16,7 +16,7 @@ public final class GogInstaller {
 
     static {
         try {
-            System.loadLibrary("SDL2");
+            System.loadLibrary("SDL3");
         } catch (Throwable ignored) {
         }
         System.loadLibrary("main");

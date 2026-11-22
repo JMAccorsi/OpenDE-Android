@@ -51,10 +51,27 @@ target_link_libraries(dx-render PUBLIC dx-engine glad stb_image)
 
 file(GLOB DX_GAME_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/game/*.cc)
 if(ANDROID)
-  add_library(deusex SHARED ${DX_GAME_SOURCES})
+  file(GLOB DXL_CORE_SOURCES CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/launcher/dxl/core/*.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/launcher/dxl/platform/posix/delete.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/launcher/dxl/platform/posix/fs.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/launcher/dxl/ui/*.c)
+  add_library(dxl-ui STATIC ${DXL_CORE_SOURCES})
+  set_target_properties(dxl-ui PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED ON
+    C_EXTENSIONS ON
+    POSITION_INDEPENDENT_CODE ON)
+  target_include_directories(dxl-ui PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/launcher/dxl)
+  target_compile_definitions(dxl-ui PRIVATE _POSIX_C_SOURCE=200809L)
+  target_compile_options(dxl-ui PRIVATE -Wall -Wextra -Wno-unused-parameter)
+  target_link_libraries(dxl-ui PUBLIC SDL3::SDL3 SDL3_ttf::SDL3_ttf libxmp-lite::xmp_lite_static m)
+
+  add_library(deusex SHARED ${DX_GAME_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/launcher/opende_launcher.cc)
   set_target_properties(deusex PROPERTIES OUTPUT_NAME "main")
+  target_compile_definitions(deusex PRIVATE OPENDEX_HAS_DXLAUNCHER=1)
   target_include_directories(deusex SYSTEM PRIVATE ${CMAKE_SOURCE_DIR}/vendor/xz/src/liblzma/api)
-  target_link_libraries(deusex PRIVATE dx-render SDL3::SDL3 android log atomic liblzma z)
+  target_link_libraries(deusex PRIVATE dx-render dxl-ui SDL3::SDL3 android log atomic liblzma z)
 else()
   add_executable(deusex ${DX_GAME_SOURCES})
   target_link_libraries(deusex PRIVATE dx-render SDL3::SDL3-static)

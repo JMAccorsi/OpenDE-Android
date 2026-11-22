@@ -16,6 +16,9 @@
 #include "game/gyro_aim.h"
 #include "game/perf_overlay.h"
 #include "game/touch_overlay.h"
+#ifdef OPENDEX_HAS_DXLAUNCHER
+#include "launcher/opende_launcher.h"
+#endif
 #include "render/lighting.h"
 #include "render/scene_renderer.h"
 
@@ -28,6 +31,7 @@
 #include <emscripten/html5.h>
 #endif
 #ifdef __ANDROID__
+#include <jni.h>
 #include <sys/stat.h>
 #endif
 
@@ -179,10 +183,13 @@ namespace {
         std::string ini;
         std::string userIni;
         std::string mod;
+        std::string gameDir;
+        std::string launcherFonts;
         int frames = -1;
         int width = 1280;
         int height = 720;
         bool sizeGiven = false;
+        bool noLauncher = false;
         std::vector<std::string> commands;
         std::vector<std::pair<int, std::string>> actions;
     };
@@ -208,6 +215,12 @@ namespace {
                 options.userIni = argv[++i];
             } else if (arg == "--mod" && i + 1 < argc) {
                 options.mod = argv[++i];
+            } else if (arg == "--game" && i + 1 < argc) {
+                options.gameDir = argv[++i];
+            } else if (arg == "--launcher-fonts" && i + 1 < argc) {
+                options.launcherFonts = argv[++i];
+            } else if (arg == "--no-launcher") {
+                options.noLauncher = true;
             } else if (arg == "--exec" && i + 1 < argc) {
                 options.commands.push_back(argv[++i]);
             } else if (arg == "--at" && i + 1 < argc) {
@@ -222,6 +235,29 @@ namespace {
         }
         return options;
     }
+
+#ifdef __ANDROID__
+    void callOpenDEActivityVoidMethod(const char* methodName)
+    {
+        JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
+        if (!env || !activity) {
+            return;
+        }
+        jclass cls = env->GetObjectClass(activity);
+        if (cls) {
+            jmethodID mid = env->GetStaticMethodID(cls, methodName, "()V");
+            if (mid) {
+                env->CallStaticVoidMethod(cls, mid);
+            }
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+            env->DeleteLocalRef(cls);
+        }
+        env->DeleteLocalRef(activity);
+    }
+#endif
 
     void saveBmp(const std::string& path, const std::vector<uint8_t>& rgba, int width, int height)
     {
@@ -865,7 +901,9 @@ namespace {
 
         bool start()
         {
-            std::filesystem::path root = dx::config::findGameRoot(DEUSEX_GAME_DATA);
+            std::filesystem::path root = !options.gameDir.empty()
+                ? std::filesystem::path(options.gameDir)
+                : dx::config::findGameRoot(DEUSEX_GAME_DATA);
             if (!options.mod.empty()) {
                 std::filesystem::path mod = (root / "..").lexically_normal() / "mods" / options.mod;
                 if (!std::filesystem::is_directory(mod)) {
@@ -2460,6 +2498,41 @@ int main(int argc, char** argv)
             }
         }
     }
+    bool returnToLauncher = false;
+#ifdef OPENDEX_HAS_DXLAUNCHER
+    if (!options.noLauncher && options.frames < 0 && options.map.empty()) {
+        game::LauncherParams launcherParams;
+#ifdef __ANDROID__
+        launcherParams.gameRoot = options.gameDir;
+#else
+        launcherParams.gameRoot = !options.gameDir.empty()
+            ? options.gameDir
+            : dx::config::findGameRoot(DEUSEX_GAME_DATA).string();
+#endif
+        launcherParams.fontsDir = options.launcherFonts;
+#ifdef __ANDROID__
+        if (launcherParams.fontsDir.empty()) {
+            if (const char* extPath = SDL_GetAndroidExternalStoragePath()) {
+                launcherParams.fontsDir = (std::filesystem::path(extPath) / "dxlauncher" / "fonts").string();
+            }
+        }
+#endif
+        launcherParams.initialMod = options.mod;
+        game::LauncherOutcome outcome = game::runDXLauncher(launcherParams);
+        if (outcome.action == game::LauncherAction::Quit) {
+            SDL_Quit();
+            return 0;
+        }
+        if (!outcome.gameRoot.empty()) {
+            options.gameDir = outcome.gameRoot;
+        }
+        options.mod = outcome.modId;
+        if (!outcome.startUrl.empty()) {
+            options.map = outcome.startUrl;
+        }
+        returnToLauncher = outcome.returnAfterPlaying;
+    }
+#endif
 #if defined(__EMSCRIPTEN__) || defined(__ANDROID__)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
@@ -2547,6 +2620,11 @@ int main(int argc, char** argv)
     dx::audio::shutdown();
     SDL_GL_DestroyContext(context);
     SDL_DestroyWindow(window);
+#ifdef __ANDROID__
+    if (returnToLauncher && result == 0) {
+        callOpenDEActivityVoidMethod("restartToLauncher");
+    }
+#endif
     SDL_Quit();
     return result;
 #endif

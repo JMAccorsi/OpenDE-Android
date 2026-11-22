@@ -1,0 +1,101 @@
+/* Shared primitives for the launcher core.
+ *
+ * The core is deliberately free of SDL, of Win32 concepts, and of any policy
+ * about where files live: callers pass absolute paths in. That is what lets
+ * the whole contract be unit-tested on a host with no display.
+ */
+#ifndef DXL_COMMON_H
+#define DXL_COMMON_H
+
+#include <stddef.h>
+#include <stdarg.h>
+
+#define DXL_ERR_LEN 256
+
+/* Carries a human-readable failure reason back to the caller. Functions that
+ * take one may be passed NULL when the reason is not wanted. */
+typedef struct {
+    char msg[DXL_ERR_LEN];
+} dxl_err;
+
+void  dxl_err_set(dxl_err *e, const char *fmt, ...);
+const char *dxl_err_msg(const dxl_err *e);
+
+/* Allocation that aborts rather than returning NULL. A launcher that cannot
+ * allocate a few kilobytes has nothing useful left to do, and threading the
+ * failure through every call site would bury the logic we care about. */
+void *dxl_xmalloc(size_t n);
+void *dxl_xrealloc(void *p, size_t n);
+char *dxl_xstrdup(const char *s);
+char *dxl_xstrndup(const char *s, size_t n);
+
+/* ASCII case-insensitive compare. Deliberately not locale-aware: ini section
+ * and key names are ASCII, and a Turkish locale must not change how
+ * "GameRenderDevice" matches. */
+int  dxl_stricmp(const char *a, const char *b);
+int  dxl_strnicmp(const char *a, const char *b, size_t n);
+/* Case-insensitive substring search -- the appStrfind of dx-reverse-info/cli-flags.md. */
+const char *dxl_stristr(const char *hay, const char *needle);
+
+/* In-place whitespace trim; returns a pointer into the original buffer. */
+char *dxl_trim(char *s);
+
+/* The text's first token, as the engine's import takes one (the original's
+ * token reader, Core.dll 0x10164cb0): a quoted string's text, else the run
+ * of letters, digits, _ and - it begins with, none for a blank first; into
+ * t, 0 when it does not fit. */
+int   dxl_first_token(const char *v, char *t, size_t size);
+/* A bool as the launcher reads one in its own files, by its first token:
+ * 1 for true, yes or 1 in any case, 0 for false, no or 0, -1 for other text
+ * ("False " is false, "1.0" true, " True" neither). */
+int   dxl_text_bool(const char *v);
+/* A bool as the game's inis are read, a class's config import and the
+ * engine's own config alike (UBoolProperty::ImportText, Core.dll
+ * 0x10166380; DXEngine's IniProperty.cpp, bugs.md ENG.24): 1 for true or 1
+ * in any case, 0 for false or 0; yes and no are other text, -1. */
+int   dxl_class_bool(const char *v);
+
+/* Text for showing, as UTF-8: in as it is when it is UTF-8, else read as
+ * Latin-1, the game's own (a save the original wrote); cut at a whole
+ * character to fit size. */
+void  dxl_text_utf8(const char *in, char *out, size_t size);
+/* Drops what a cut at a byte count left of a last UTF-8 character (its lead
+ * byte without all its continuation bytes), before dxl_text_utf8 judges the
+ * text; Latin-1 text loses at most that one character. */
+void  dxl_text_drop_cut(char *s);
+/* The bytes of the whole UTF-8 character s begins with (1 for ASCII; not
+ * overlong, no surrogate, at most U+10FFFF), 0 when none does. */
+size_t dxl_utf8_char(const char *s);
+/* How many of s's bytes, max at most, end on a whole UTF-8 character: a
+ * cut for "%.*s" that leaves none broken (a byte of no UTF-8 character
+ * counted alone). */
+int   dxl_utf8_fit(const char *s, int max);
+/* Text for a terminal or a log: each control character a '?' -- C0's, DEL
+ * and C1's, U+0080 to U+009F (or a byte 0x80 to 0x9F of no UTF-8
+ * character), whose CSI and OSC xterm's and VTE's terminals take as ESC [
+ * and ESC ] -- the rest as it is; cut at a whole character to fit size. in
+ * and out may be the same. */
+void  dxl_text_no_controls(const char *in, char *out, size_t size);
+
+/* A number's text in the C locale's spelling, '.' its decimal point,
+ * whatever locale a library in the process has set (a shell extension in
+ * Windows' folder dialog): strtod's reading, and snprintf's writing of
+ * numbers alone, no text (bugs.md LCORE.41). */
+double dxl_strtod_c(const char *s, char **end);
+int    dxl_snprintf_c(char *out, size_t size, const char *fmt, ...);
+
+/* Growable string, used for building flag strings and file contents. */
+typedef struct {
+    char  *data;
+    size_t len, cap;
+} dxl_buf;
+
+void dxl_buf_init(dxl_buf *b);
+void dxl_buf_free(dxl_buf *b);
+void dxl_buf_add(dxl_buf *b, const char *s, size_t n);
+void dxl_buf_puts(dxl_buf *b, const char *s);
+void dxl_buf_printf(dxl_buf *b, const char *fmt, ...);
+/* Appends s, separated from existing content by a single space if non-empty. */
+void dxl_buf_word(dxl_buf *b, const char *s);
+
+#endif
