@@ -981,6 +981,9 @@ namespace {
                 SDL_free(text);
                 return result;
             };
+            hooks.snapshot = [this](int width, int height) {
+                return captureScene(width, height);
+            };
             dx::extension::setFrameCanvas(&renderer->canvas());
             dx::extension::setProjector([this](const dx::Vector& location, float& pixelX, float& pixelY) {
                 return project(location, pixelX, pixelY);
@@ -1867,6 +1870,67 @@ namespace {
             renderer->endFrame();
         }
 
+        std::vector<uint8_t> captureScene(int width, int height)
+        {
+            dx::Vector location;
+            dx::Rotator rotation;
+            float fov = 90.0f;
+            if (!world || !world->calcView(location, rotation, fov) || width <= 0 || height <= 0) {
+                return {};
+            }
+            int frameW = 0;
+            int frameH = 0;
+            SDL_GetWindowSizeInPixels(window, &frameW, &frameH);
+            if (frameW <= 0 || frameH <= 0) {
+                return {};
+            }
+            renderer->beginFrame(frameW, frameH);
+            dx::UObject* player = world->player();
+            dx::UObject* viewActor = nullptr;
+            if (player && !dx::pawn::bBehindView(player)) {
+                viewActor = dx::playerpawn::ViewTarget(player) ? dx::playerpawn::ViewTarget(player) : player;
+            }
+            renderer->drawScene(world->level, world->actors, location, rotation, displayFov(fov, frameW, frameH), viewActor);
+            renderer->endFrame();
+            renderer->applyBrightness(static_cast<float>(std::atof(dx::config::system().get(videoSection(), "Brightness").value_or("0.5").c_str())));
+            std::vector<uint8_t> pixels;
+            int shotWidth = 0;
+            int shotHeight = 0;
+            renderer->readPixels(pixels, shotWidth, shotHeight);
+            if (shotWidth <= 0 || shotHeight <= 0 || pixels.size() < static_cast<size_t>(shotWidth) * static_cast<size_t>(shotHeight) * 4) {
+                return {};
+            }
+            int cropWidth = std::min(shotWidth, shotHeight * width / height);
+            int cropHeight = std::min(shotHeight, shotWidth * height / width);
+            int left = (shotWidth - cropWidth) / 2;
+            int top = (shotHeight - cropHeight) / 2;
+            std::vector<uint8_t> out(static_cast<size_t>(width) * static_cast<size_t>(height) * 4);
+            for (int y = 0; y < height; y++) {
+                int y0 = top + y * cropHeight / height;
+                int y1 = std::max(top + (y + 1) * cropHeight / height, y0 + 1);
+                for (int x = 0; x < width; x++) {
+                    int x0 = left + x * cropWidth / width;
+                    int x1 = std::max(left + (x + 1) * cropWidth / width, x0 + 1);
+                    uint32_t sum[3] = {};
+                    for (int sy = y0; sy < y1; sy++) {
+                        for (int sx = x0; sx < x1; sx++) {
+                            const uint8_t* pixel = pixels.data() + (static_cast<size_t>(sy) * static_cast<size_t>(shotWidth) + static_cast<size_t>(sx)) * 4;
+                            sum[0] += pixel[0];
+                            sum[1] += pixel[1];
+                            sum[2] += pixel[2];
+                        }
+                    }
+                    uint32_t count = static_cast<uint32_t>((y1 - y0) * (x1 - x0));
+                    uint8_t* target = out.data() + (static_cast<size_t>(y) * static_cast<size_t>(width) + static_cast<size_t>(x)) * 4;
+                    target[0] = static_cast<uint8_t>(sum[0] / count);
+                    target[1] = static_cast<uint8_t>(sum[1] / count);
+                    target[2] = static_cast<uint8_t>(sum[2] / count);
+                    target[3] = 255;
+                }
+            }
+            return out;
+        }
+
         void scriptedAction(const std::string& action)
         {
             size_t space = action.find(' ');
@@ -2544,7 +2608,12 @@ int main(int argc, char** argv)
 #endif
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_Window* window = SDL_CreateWindow("Deus Ex", options.width, options.height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+#ifdef __ANDROID__
+    SDL_WindowFlags gameWindowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE | SDL_WINDOW_FULLSCREEN;
+#else
+    SDL_WindowFlags gameWindowFlags = SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE;
+#endif
+    SDL_Window* window = SDL_CreateWindow("Deus Ex", options.width, options.height, gameWindowFlags);
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return 1;
@@ -2615,6 +2684,7 @@ int main(int argc, char** argv)
     } catch (const std::exception& error) {
         SDL_LogError(SDL_LOG_CATEGORY_APPLICATION, "error: %s", error.what());
         std::fprintf(stderr, "error: %s\n", error.what());
+        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Deus Ex", error.what(), window);
         result = 1;
     }
     dx::audio::shutdown();

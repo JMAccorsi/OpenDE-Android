@@ -1453,12 +1453,6 @@ namespace dx {
             std::stable_sort(surfaces.begin(), surfaces.end(), [](const TranslucentSurface& a, const TranslucentSurface& b) {
                 return a.order < b.order;
             });
-            for (const TranslucentSurface& surface : surfaces) {
-                drawBatch(*surface.batch, view, &surface.first, &surface.count, 1, surface.node, uploadedLights);
-            }
-            device->setPan(0, 0);
-            device->setScale(1, 1);
-            device->setBlend(BlendMode::Opaque);
             return;
         }
         auto collectRanges = [&](int32_t index) {
@@ -1693,8 +1687,8 @@ namespace dx {
         } else {
             drawActors(actors, sky, viewActor, false);
         }
-        flushTranslucent(sky);
         drawLevelGeometry(sky, true);
+        flushTranslucent(sky);
     }
 
     void SceneRenderer::markMirror(const View& view, const MirrorSurface& mirror)
@@ -2554,10 +2548,36 @@ namespace dx {
 
     void SceneRenderer::flushTranslucent(const View& view)
     {
-        if (translucentCount == 0) {
+        std::vector<TranslucentSurface>& surfaces = scratchTranslucentSurfaces;
+        if (translucentCount == 0 && surfaces.empty()) {
             return;
         }
         applyView(view);
+        size_t nextSurface = 0;
+        uint32_t uploadedLights = ~0u;
+        bool hasState = false;
+        auto drawSurfacesBefore = [&](int32_t limit) {
+            bool drew = false;
+            while (nextSurface < surfaces.size() && surfaces[nextSurface].order <= limit) {
+                const TranslucentSurface& surface = surfaces[nextSurface++];
+                drawBatch(*surface.batch, view, &surface.first, &surface.count, 1, surface.node, uploadedLights);
+                drew = true;
+            }
+            if (drew) {
+                device->setPan(0, 0);
+                device->setScale(1, 1);
+                device->setOcclusionSource(OcclusionSource::Mesh);
+                hasState = false;
+            }
+        };
+
+        if (translucentCount == 0) {
+            drawSurfacesBefore(std::numeric_limits<int32_t>::max());
+            surfaces.clear();
+            device->setBlend(BlendMode::Opaque);
+            return;
+        }
+
         static std::vector<size_t> order;
         order.resize(translucentCount);
         for (size_t i = 0; i < translucentCount; i++) {
@@ -2572,6 +2592,7 @@ namespace dx {
             return first.distance > second.distance;
         });
         struct TransDraw {
+            int32_t order;
             uint32_t flags;
             uint32_t texture;
             GroupExtra extra;
@@ -2599,7 +2620,7 @@ namespace dx {
             const int32_t first = static_cast<int32_t>(totalVerts);
             const int32_t count = static_cast<int32_t>(item.vertices.size());
             totalVerts += item.vertices.size();
-            if (!draws.empty()) {
+            if (!draws.empty() && surfaces.empty()) {
                 TransDraw& prev = draws.back();
                 if (prev.flags == item.flags && prev.texture == tex &&
                     prev.extra.lightmap == extra.lightmap &&
@@ -2609,10 +2630,12 @@ namespace dx {
                     continue;
                 }
             }
-            draws.push_back({ item.flags, tex, extra, first, count });
+            draws.push_back({ item.order, item.flags, tex, extra, first, count });
         }
         if (totalVerts == 0) {
             translucentCount = 0;
+            drawSurfacesBefore(std::numeric_limits<int32_t>::max());
+            surfaces.clear();
             device->setBlend(BlendMode::Opaque);
             return;
         }
@@ -2639,7 +2662,6 @@ namespace dx {
             device->upload(combined);
         }
         translucentCount = 0;
-        bool hasState = false;
         uint32_t lastFlags = 0;
         int32_t lastShaderFlags = 0;
         uint32_t lastTexture = 0;
@@ -2647,6 +2669,7 @@ namespace dx {
         uint32_t lastLightMask = 0;
         bool lastCull = false;
         for (const TransDraw& d : draws) {
+            drawSurfacesBefore(d.order - 1);
             if (!d.extra.lightmap) {
                 if (!hasState || d.flags != lastFlags || lastShaderFlags != 0 || lastCull) {
                     applyBlend(d.flags | PF_TwoSided, 0);
@@ -2674,6 +2697,7 @@ namespace dx {
                     }
                     device->setDynamicLights(batchLights);
                     lastLightMask = d.extra.lightMask;
+                    uploadedLights = ~0u;
                 }
             }
             if (!hasState || d.extra.lightmap != lastLightmap) {
@@ -2693,6 +2717,8 @@ namespace dx {
             hasState = true;
             device->drawRange(d.first, d.count);
         }
+        drawSurfacesBefore(std::numeric_limits<int32_t>::max());
+        surfaces.clear();
         device->setBlend(BlendMode::Opaque);
     }
 

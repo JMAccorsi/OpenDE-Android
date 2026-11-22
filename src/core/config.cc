@@ -16,6 +16,7 @@
 #include <memory>
 #include <sstream>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace dx {
     namespace {
@@ -225,18 +226,170 @@ namespace dx {
                 }
             }
         }
+        std::string_view trimView(std::string_view text)
+        {
+            size_t begin = 0;
+            size_t end = text.size();
+            while (begin < end && (text[begin] == ' ' || text[begin] == '\t' || text[begin] == '\r' || text[begin] == '\n')) {
+                begin++;
+            }
+            while (end > begin && (text[end - 1] == ' ' || text[end - 1] == '\t' || text[end - 1] == '\r' || text[end - 1] == '\n')) {
+                end--;
+            }
+            return text.substr(begin, end - begin);
+        }
+
+        uint64_t iniPairHash(std::string_view key, std::string_view value)
+        {
+            uint64_t h = 14695981039346656037ULL;
+            for (unsigned char c : key) {
+                if (c >= 'A' && c <= 'Z') {
+                    c = static_cast<unsigned char>(c - 'A' + 'a');
+                }
+                h ^= c;
+                h *= 1099511628211ULL;
+            }
+            h ^= 0xFFU;
+            h *= 1099511628211ULL;
+            for (unsigned char c : value) {
+                h ^= c;
+                h *= 1099511628211ULL;
+            }
+            return h;
+        }
     }
 
     bool Ini::load(const std::filesystem::path& filePath)
     {
+        sections.clear();
         path = filePath;
-        std::ifstream file(filePath, std::ios::binary);
+        std::ifstream file(filePath, std::ios::binary | std::ios::ate);
         if (!file) {
             return false;
         }
-        std::string content((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-        if (content.size() >= 2 && static_cast<uint8_t>(content[0]) == 0xff && static_cast<uint8_t>(content[1]) == 0xfe) {
+        std::streamoff rawSize = file.tellg();
+        if (rawSize < 0) {
+            return false;
+        }
+        size_t fileSize = static_cast<size_t>(rawSize);
+        file.seekg(0, std::ios::beg);
+
+        unsigned char bom[2] = {};
+        if (fileSize >= 2) {
+            file.read(reinterpret_cast<char*>(bom), 2);
+            file.seekg(0, std::ios::beg);
+        }
+        bool isUtf16Le = (fileSize >= 2 && bom[0] == 0xff && bom[1] == 0xfe);
+
+        std::vector<std::unordered_set<uint64_t>> seenPerSection;
+        size_t currentIdx = static_cast<size_t>(-1);
+
+        auto processLine = [&](std::string_view rawLine) {
+            std::string_view line = trimView(rawLine);
+            if (line.empty() || line[0] == ';') {
+                return;
+            }
+            if (line.front() == '[' && line.back() == ']') {
+                std::string_view sectionName = line.substr(1, line.size() - 2);
+                currentIdx = static_cast<size_t>(-1);
+                for (size_t i = 0; i < sections.size(); ++i) {
+                    if (iequals(sections[i].name, sectionName)) {
+                        currentIdx = i;
+                    }
+                }
+                if (currentIdx == static_cast<size_t>(-1)) {
+                    sections.push_back({ std::string(sectionName), {} });
+                    seenPerSection.emplace_back();
+                    currentIdx = sections.size() - 1;
+                }
+                return;
+            }
+            size_t equals = line.find('=');
+            if (currentIdx == static_cast<size_t>(-1) || equals == std::string_view::npos) {
+                return;
+            }
+            std::string_view key = trimView(line.substr(0, equals));
+            std::string_view value = trimView(line.substr(equals + 1));
+            uint64_t pairHash = iniPairHash(key, value);
+            std::unordered_set<uint64_t>& seen = seenPerSection[currentIdx];
+            Section& sec = sections[currentIdx];
+            if (seen.count(pairHash) != 0) {
+                for (const auto& [existingKey, existingVal] : sec.entries) {
+                    if (iequals(existingKey, key) && existingVal == value) {
+                        return;
+                    }
+                }
+            }
+            seen.insert(pairHash);
+            sec.entries.emplace_back(std::string(key), std::string(value));
+        };
+
+        // Stream multi-megabyte INIs in bounded chunks so bloated legacy files heal with O(1) RAM.
+        constexpr size_t kSmallIniLimit = 2U * 1024U * 1024U;
+        if (!isUtf16Le && fileSize > kSmallIniLimit) {
+            std::vector<char> chunk(1024U * 1024U);
+            std::string carry;
+            bool firstChunk = true;
+            std::string converted;
+            while (file) {
+                file.read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+                size_t got = static_cast<size_t>(file.gcount());
+                if (got == 0) {
+                    break;
+                }
+                std::string_view view(chunk.data(), got);
+                if (firstChunk) {
+                    firstChunk = false;
+                    if (view.size() >= 3 && static_cast<uint8_t>(view[0]) == 0xef &&
+                        static_cast<uint8_t>(view[1]) == 0xbb && static_cast<uint8_t>(view[2]) == 0xbf) {
+                        view.remove_prefix(3);
+                    }
+                }
+                size_t pos = 0;
+                while (pos < view.size()) {
+                    size_t nl = view.find('\n', pos);
+                    if (nl == std::string_view::npos) {
+                        carry.append(view.data() + pos, view.size() - pos);
+                        break;
+                    }
+                    std::string_view lineView;
+                    if (carry.empty()) {
+                        lineView = view.substr(pos, nl - pos);
+                    } else {
+                        carry.append(view.data() + pos, nl - pos);
+                        lineView = carry;
+                    }
+                    bool hasNonAscii = false;
+                    for (unsigned char c : lineView) {
+                        if (c >= 0x80) {
+                            hasNonAscii = true;
+                            break;
+                        }
+                    }
+                    if (hasNonAscii) {
+                        converted = utf8ToCp1252IfValid(lineView);
+                        processLine(converted);
+                    } else {
+                        processLine(lineView);
+                    }
+                    carry.clear();
+                    pos = nl + 1;
+                }
+            }
+            if (!carry.empty()) {
+                converted = utf8ToCp1252IfValid(carry);
+                processLine(converted);
+            }
+            return true;
+        }
+
+        std::string content(fileSize, '\0');
+        if (fileSize > 0) {
+            file.read(content.data(), static_cast<std::streamsize>(fileSize));
+        }
+        if (isUtf16Le) {
             std::string narrow;
+            narrow.reserve(content.size() / 2);
             for (size_t i = 2; i + 1 < content.size(); i += 2) {
                 uint16_t c = static_cast<uint16_t>(static_cast<uint8_t>(content[i]) | (static_cast<uint8_t>(content[i + 1]) << 8));
                 narrow.push_back(c < 256 ? static_cast<char>(c) : '?');
@@ -245,37 +398,14 @@ namespace dx {
         } else {
             content = utf8ToCp1252IfValid(content);
         }
-        Section* current = nullptr;
         size_t pos = 0;
         while (pos < content.size()) {
             size_t end = content.find('\n', pos);
             if (end == std::string::npos) {
                 end = content.size();
             }
-            std::string line = trim(std::string_view(content).substr(pos, end - pos));
+            processLine(std::string_view(content).substr(pos, end - pos));
             pos = end + 1;
-            if (line.empty() || line[0] == ';') {
-                continue;
-            }
-            if (line.front() == '[' && line.back() == ']') {
-                std::string sectionName = line.substr(1, line.size() - 2);
-                current = nullptr;
-                for (Section& existing : sections) {
-                    if (iequals(existing.name, sectionName)) {
-                        current = &existing;
-                    }
-                }
-                if (!current) {
-                    sections.push_back({ sectionName, {} });
-                    current = &sections.back();
-                }
-                continue;
-            }
-            size_t equals = line.find('=');
-            if (!current || equals == std::string::npos) {
-                continue;
-            }
-            current->entries.emplace_back(trim(line.substr(0, equals)), trim(line.substr(equals + 1)));
         }
         return true;
     }
@@ -677,7 +807,13 @@ namespace dx {
 
         void loadPreferred(Ini& ini, const std::filesystem::path& userFile, const std::filesystem::path& gameFile, const std::filesystem::path& fallbackFile)
         {
-            if (!ini.load(userFile) && !ini.load(gameFile)) {
+            if (ini.load(userFile)) {
+                std::error_code ec;
+                uintmax_t sz = std::filesystem::file_size(userFile, ec);
+                if (!ec && sz > 512U * 1024U) {
+                    ini.save();
+                }
+            } else if (!ini.load(gameFile)) {
                 ini.load(fallbackFile);
             }
             ini.path = userFile;
@@ -750,6 +886,9 @@ namespace dx {
                         const std::filesystem::path& userIniPath)
         {
             ConfigState& s = state();
+            s.others.clear();
+            s.localizations.clear();
+            s.englishLocalizations.clear();
             s.systemDirectory = systemDirectory;
             std::filesystem::path userDir = userDirectory();
             std::filesystem::path modSys = s.modDirectory.empty() ? std::filesystem::path{} : resolveSubdir(s.modDirectory, "System");
