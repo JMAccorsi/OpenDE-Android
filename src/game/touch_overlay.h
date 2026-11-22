@@ -1,6 +1,6 @@
 #pragma once
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 #include <array>
 #include <cstdint>
@@ -100,7 +100,7 @@ namespace game {
         bool handleTouchEvent(const SDL_Event& event, int drawWidth, int drawHeight, const TouchInputCallbacks& cb);
         bool handleKeypadExitTouch(const SDL_Event& event, int drawWidth, int drawHeight, float kx, float ky, float kw, float kh, const std::function<void()>& onClose);
         bool handleEditorPhysicalKey(SDL_Keycode sym, bool pressed);
-        bool handleEditorControllerButton(SDL_GameControllerButton button, bool pressed);
+        bool handleEditorControllerButton(SDL_GamepadButton button, bool pressed);
 
         void render(dx::Canvas2D& canvas, bool ptBr, bool gameplayBlocked, bool showKeypadExit = false, float kx = 0.0f, float ky = 0.0f, float kw = 0.0f, float kh = 0.0f);
 

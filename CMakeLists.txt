@@ -36,7 +36,7 @@ set(DEUSEX_GAME_DATA "${CMAKE_SOURCE_DIR}/game-data" CACHE PATH "Path to the ori
 # Dependencies
 set(BUILD_SHARED_LIBS OFF)
 
-# SDL2
+# SDL3
 if(ANDROID)
     set(SDL_SHARED ON CACHE BOOL "" FORCE)
     set(SDL_STATIC OFF CACHE BOOL "" FORCE)
@@ -44,8 +44,17 @@ else()
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
 endif()
-set(SDL_TEST OFF CACHE BOOL "" FORCE)
-add_subdirectory(${CMAKE_SOURCE_DIR}/vendor/SDL2-2.32.10 SYSTEM)
+set(SDL_TEST_LIBRARY OFF CACHE BOOL "" FORCE)
+set(SDL_TESTS OFF CACHE BOOL "" FORCE)
+set(SDL_EXAMPLES OFF CACHE BOOL "" FORCE)
+add_subdirectory(${CMAKE_SOURCE_DIR}/vendor/SDL3-3.4.20 SYSTEM)
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+    foreach(_sdl_tgt SDL3-shared SDL3-static)
+        if(TARGET ${_sdl_tgt})
+            target_compile_options(${_sdl_tgt} PRIVATE $<$<COMPILE_LANGUAGE:C>:-fno-fast-math -ffp-model=precise>)
+        endif()
+    endforeach()
+endif()
 
 if(EMSCRIPTEN)
     add_compile_options(-fwasm-exceptions)
@@ -79,11 +88,11 @@ if(NOT ANDROID)
         ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui_draw.cpp
         ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui_tables.cpp
         ${CMAKE_SOURCE_DIR}/vendor/imgui/imgui_widgets.cpp
-        ${CMAKE_SOURCE_DIR}/vendor/imgui/backends/imgui_impl_sdl2.cpp
+        ${CMAKE_SOURCE_DIR}/vendor/imgui/backends/imgui_impl_sdl3.cpp
         ${CMAKE_SOURCE_DIR}/vendor/imgui/backends/imgui_impl_opengl3.cpp
     )
     target_include_directories(imgui SYSTEM PUBLIC ${CMAKE_SOURCE_DIR}/vendor/imgui ${CMAKE_SOURCE_DIR}/vendor/imgui/backends)
-    target_link_libraries(imgui PUBLIC SDL2::SDL2-static)
+    target_link_libraries(imgui PUBLIC SDL3::SDL3-static)
 
     # ImGuizmo
     add_library(imguizmo STATIC ${CMAKE_SOURCE_DIR}/vendor/imguizmo/ImGuizmo.cpp)

@@ -34,11 +34,11 @@
 #include "render/scene_renderer.h"
 #include "render/texture_cache.h"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <glad/gl.h>
 #include <imgui.h>
 #include <imgui_impl_opengl3.h>
-#include <imgui_impl_sdl2.h>
+#include <imgui_impl_sdl3.h>
 #include <imgui_internal.h>
 
 #include <algorithm>
@@ -78,9 +78,9 @@ namespace dx::editor {
 
     inline void saveBmp(const std::string& path, std::vector<uint8_t>& rgba, int width, int height)
     {
-        SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(rgba.data(), width, height, 32, width * 4, SDL_PIXELFORMAT_ABGR8888);
+        SDL_Surface* surface = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_ABGR8888, rgba.data(), width * 4);
         SDL_SaveBMP(surface, path.c_str());
-        SDL_FreeSurface(surface);
+        SDL_DestroySurface(surface);
     }
 
     inline std::string lower(const std::string& text)

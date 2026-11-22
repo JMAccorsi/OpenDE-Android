@@ -17,7 +17,7 @@ public class OpenDEActivity extends SDLActivity {
     @Override
     protected String[] getLibraries() {
         return new String[] {
-            "SDL2",
+            "SDL3",
             "main"
         };
     }

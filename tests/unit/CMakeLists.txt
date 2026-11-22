@@ -1,6 +1,6 @@
 file(GLOB UNIT_TEST_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/*.cc)
 add_executable(unit-tests ${UNIT_TEST_SOURCES} ${CMAKE_SOURCE_DIR}/src/editor/script_workspace.cc ${CMAKE_SOURCE_DIR}/src/editor/log_capture.cc)
-target_link_libraries(unit-tests PRIVATE dx-render dx-compiler Catch2 SDL2::SDL2-static)
+target_link_libraries(unit-tests PRIVATE dx-render dx-compiler Catch2 SDL3::SDL3-static)
 target_compile_definitions(unit-tests PRIVATE DEUSEX_GAME_DATA="${DEUSEX_GAME_DATA}" UCC_PATH="$<TARGET_FILE:ucc>")
 add_dependencies(unit-tests ucc)
 if(EXISTS "${DEUSEX_GAME_DATA}/System/Core.u")

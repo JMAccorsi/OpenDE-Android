@@ -1,6 +1,6 @@
 #pragma once
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 
 #include <cstdint>
 #include <string>
@@ -69,9 +69,9 @@ namespace game {
         const GyroSettings& settings() const { return settings_; }
 
         void setSuspended(bool suspended);
-        void setController(SDL_GameController* controller);
+        void setController(SDL_Gamepad* controller);
         void refreshDisplayRotation();
-        void handleControllerSensorEvent(const SDL_ControllerSensorEvent& ev);
+        void handleControllerSensorEvent(const SDL_GamepadSensorEvent& ev);
 
         GyroDelta poll(bool allowOutput);
         GyroDebugInfo debugInfo() const;
@@ -86,11 +86,11 @@ namespace game {
         bool initialized_ = false;
         bool suspended_ = false;
 
-        SDL_GameController* controller_ = nullptr;
+        SDL_Gamepad* controller_ = nullptr;
         bool controllerHasGyro_ = false;
         bool controllerHasAccel_ = false;
         bool controllerSensorsEnabled_ = false;
-        uint64_t prevCtrlTsUs_ = 0;
+        uint64_t prevCtrlTsNs_ = 0;
         uint64_t prevCtrlPerfCounter_ = 0;
         float pendingCtrlYawRad_ = 0.0f;
         float pendingCtrlPitchRad_ = 0.0f;

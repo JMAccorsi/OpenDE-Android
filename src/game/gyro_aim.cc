@@ -112,10 +112,10 @@ namespace game {
         }
         if (controller_) {
             if (controllerHasGyro_) {
-                SDL_GameControllerSetSensorEnabled(controller_, SDL_SENSOR_GYRO, SDL_FALSE);
+                SDL_SetGamepadSensorEnabled(controller_, SDL_SENSOR_GYRO, false);
             }
             if (controllerHasAccel_) {
-                SDL_GameControllerSetSensorEnabled(controller_, SDL_SENSOR_ACCEL, SDL_FALSE);
+                SDL_SetGamepadSensorEnabled(controller_, SDL_SENSOR_ACCEL, false);
             }
             controllerSensorsEnabled_ = false;
             controller_ = nullptr;
@@ -161,27 +161,27 @@ namespace game {
         updateActiveState();
     }
 
-    void GyroAim::setController(SDL_GameController* controller)
+    void GyroAim::setController(SDL_Gamepad* controller)
     {
         if (controller_ == controller) {
             return;
         }
         if (controller_ && controllerSensorsEnabled_) {
             if (controllerHasGyro_) {
-                SDL_GameControllerSetSensorEnabled(controller_, SDL_SENSOR_GYRO, SDL_FALSE);
+                SDL_SetGamepadSensorEnabled(controller_, SDL_SENSOR_GYRO, false);
             }
             if (controllerHasAccel_) {
-                SDL_GameControllerSetSensorEnabled(controller_, SDL_SENSOR_ACCEL, SDL_FALSE);
+                SDL_SetGamepadSensorEnabled(controller_, SDL_SENSOR_ACCEL, false);
             }
         }
         controllerSensorsEnabled_ = false;
         controller_ = controller;
-        controllerHasGyro_ = controller && SDL_GameControllerHasSensor(controller, SDL_SENSOR_GYRO) == SDL_TRUE;
-        controllerHasAccel_ = controller && SDL_GameControllerHasSensor(controller, SDL_SENSOR_ACCEL) == SDL_TRUE;
+        controllerHasGyro_ = controller && SDL_GamepadHasSensor(controller, SDL_SENSOR_GYRO);
+        controllerHasAccel_ = controller && SDL_GamepadHasSensor(controller, SDL_SENSOR_ACCEL);
         if (controller_) {
             SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
                 "OpenDE_Gyro: controller '%s' hasGyro=%d hasAccel=%d",
-                SDL_GameControllerName(controller_) ? SDL_GameControllerName(controller_) : "unknown",
+                SDL_GetGamepadName(controller_) ? SDL_GetGamepadName(controller_) : "unknown",
                 controllerHasGyro_ ? 1 : 0,
                 controllerHasAccel_ ? 1 : 0);
         }
@@ -192,8 +192,8 @@ namespace game {
     void GyroAim::refreshDisplayRotation()
     {
 #ifdef __ANDROID__
-        JNIEnv* env = static_cast<JNIEnv*>(SDL_AndroidGetJNIEnv());
-        jobject activity = static_cast<jobject>(SDL_AndroidGetActivity());
+        JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+        jobject activity = static_cast<jobject>(SDL_GetAndroidActivity());
         if (env && activity) {
             jclass cls = env->GetObjectClass(activity);
             if (cls) {
@@ -218,7 +218,7 @@ namespace game {
 
     void GyroAim::resetMotionState()
     {
-        prevCtrlTsUs_ = 0;
+        prevCtrlTsNs_ = 0;
         prevCtrlPerfCounter_ = 0;
         pendingCtrlYawRad_ = 0.0f;
         pendingCtrlPitchRad_ = 0.0f;
@@ -251,14 +251,14 @@ namespace game {
         if (controllerSensorsEnabled_ != wantController) {
             if (controller_) {
                 if (controllerHasGyro_) {
-                    SDL_GameControllerSetSensorEnabled(controller_, SDL_SENSOR_GYRO, wantController ? SDL_TRUE : SDL_FALSE);
+                    SDL_SetGamepadSensorEnabled(controller_, SDL_SENSOR_GYRO, wantController);
                 }
                 if (controllerHasAccel_) {
-                    SDL_GameControllerSetSensorEnabled(controller_, SDL_SENSOR_ACCEL, wantController ? SDL_TRUE : SDL_FALSE);
+                    SDL_SetGamepadSensorEnabled(controller_, SDL_SENSOR_ACCEL, wantController);
                 }
             }
             controllerSensorsEnabled_ = wantController;
-            prevCtrlTsUs_ = 0;
+            prevCtrlTsNs_ = 0;
             prevCtrlPerfCounter_ = 0;
             pendingCtrlYawRad_ = 0.0f;
             pendingCtrlPitchRad_ = 0.0f;
@@ -424,7 +424,7 @@ namespace game {
         accumPitch += pitchRate * scale;
     }
 
-    void GyroAim::handleControllerSensorEvent(const SDL_ControllerSensorEvent& ev)
+    void GyroAim::handleControllerSensorEvent(const SDL_GamepadSensorEvent& ev)
     {
         if (!controllerSensorsEnabled_) {
             return;
@@ -438,11 +438,11 @@ namespace game {
         }
 
         float dt = 0.0f;
-        if (ev.timestamp_us > 0) {
-            if (prevCtrlTsUs_ > 0 && ev.timestamp_us > prevCtrlTsUs_) {
-                dt = static_cast<float>(static_cast<double>(ev.timestamp_us - prevCtrlTsUs_) * 1e-6);
+        if (ev.sensor_timestamp > 0) {
+            if (prevCtrlTsNs_ > 0 && ev.sensor_timestamp > prevCtrlTsNs_) {
+                dt = static_cast<float>(static_cast<double>(ev.sensor_timestamp - prevCtrlTsNs_) * 1e-9);
             }
-            prevCtrlTsUs_ = ev.timestamp_us;
+            prevCtrlTsNs_ = ev.sensor_timestamp;
         } else {
             uint64_t now = SDL_GetPerformanceCounter();
             if (prevCtrlPerfCounter_ > 0 && now > prevCtrlPerfCounter_) {
@@ -538,7 +538,7 @@ namespace game {
         if (controllerSensorsEnabled_ && controller_) {
             info.backend = "Controller";
             info.enabled = true;
-            const char* cname = SDL_GameControllerName(controller_);
+            const char* cname = SDL_GetGamepadName(controller_);
             info.gyroSensorName = cname ? cname : "Controller";
             info.gravitySensorName = controllerHasAccel_ ? "ControllerAccel" : "None";
             return info;

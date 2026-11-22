@@ -19,7 +19,8 @@
 #include "render/lighting.h"
 #include "render/scene_renderer.h"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
+#include <SDL3/SDL_main.h>
 #include <glad/gl.h>
 
 #ifdef __EMSCRIPTEN__
@@ -56,8 +57,8 @@ namespace {
 
     uint8_t translateKey(SDL_Keycode key)
     {
-        if (key >= SDLK_a && key <= SDLK_z) {
-            return static_cast<uint8_t>(dx::IK_A + (key - SDLK_a));
+        if (key >= SDLK_A && key <= SDLK_Z) {
+            return static_cast<uint8_t>(dx::IK_A + (key - SDLK_A));
         }
         if (key >= SDLK_0 && key <= SDLK_9) {
             return static_cast<uint8_t>(dx::IK_0 + (key - SDLK_0));
@@ -143,7 +144,7 @@ namespace {
             return dx::IK_Period;
         case SDLK_SLASH:
             return dx::IK_Slash;
-        case SDLK_BACKQUOTE:
+        case SDLK_GRAVE:
             return dx::IK_Tilde;
         case SDLK_LEFTBRACKET:
             return dx::IK_LeftBracket;
@@ -151,7 +152,7 @@ namespace {
             return dx::IK_Backslash;
         case SDLK_RIGHTBRACKET:
             return dx::IK_RightBracket;
-        case SDLK_QUOTE:
+        case SDLK_APOSTROPHE:
             return dx::IK_SingleQuote;
         default:
             return dx::IK_None;
@@ -225,9 +226,9 @@ namespace {
     void saveBmp(const std::string& path, const std::vector<uint8_t>& rgba, int width, int height)
     {
         std::vector<uint8_t> pixels = rgba;
-        SDL_Surface* surface = SDL_CreateRGBSurfaceWithFormatFrom(pixels.data(), width, height, 32, width * 4, SDL_PIXELFORMAT_ABGR8888);
+        SDL_Surface* surface = SDL_CreateSurfaceFrom(width, height, SDL_PIXELFORMAT_ABGR8888, pixels.data(), width * 4);
         SDL_SaveBMP(surface, path.c_str());
-        SDL_FreeSurface(surface);
+        SDL_DestroySurface(surface);
     }
 
     class Game {
@@ -277,32 +278,41 @@ namespace {
         void applyVideoMode(bool fullscreen, int width, int height)
         {
             if (fullscreen && browser) {
-                SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN_DESKTOP);
+                SDL_SetWindowFullscreenMode(window, nullptr);
+                SDL_SetWindowFullscreen(window, true);
             } else if (fullscreen) {
-                int display = SDL_GetWindowDisplayIndex(window);
-                SDL_DisplayMode wanted {};
-                wanted.w = width;
-                wanted.h = height;
-                SDL_DisplayMode mode {};
-                if (SDL_GetClosestDisplayMode(display, &wanted, &mode)) {
-                    SDL_SetWindowDisplayMode(window, &mode);
+                SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+                if (!display) {
+                    display = SDL_GetPrimaryDisplay();
                 }
-                SDL_SetWindowFullscreen(window, SDL_WINDOW_FULLSCREEN);
+                SDL_DisplayMode mode {};
+                if (SDL_GetClosestFullscreenDisplayMode(display, width, height, 0.0f, true, &mode)) {
+                    SDL_SetWindowFullscreenMode(window, &mode);
+                } else {
+                    SDL_SetWindowFullscreenMode(window, nullptr);
+                }
+                SDL_SetWindowFullscreen(window, true);
             } else {
-                SDL_SetWindowFullscreen(window, 0);
+                SDL_SetWindowFullscreen(window, false);
                 SDL_SetWindowSize(window, width, height);
             }
         }
 
         std::string availableResolutions()
         {
-            int display = SDL_GetWindowDisplayIndex(window);
+            SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+            if (!display) {
+                display = SDL_GetPrimaryDisplay();
+            }
             std::vector<std::pair<int, int>> sizes;
-            for (int i = 0; i < SDL_GetNumDisplayModes(display); i++) {
-                SDL_DisplayMode mode {};
-                if (SDL_GetDisplayMode(display, i, &mode) == 0 && mode.w >= 800 && mode.h >= 600) {
-                    sizes.emplace_back(mode.w, mode.h);
+            int modeCount = 0;
+            if (SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(display, &modeCount)) {
+                for (int i = 0; i < modeCount; i++) {
+                    if (modes[i] && modes[i]->w >= 800 && modes[i]->h >= 600) {
+                        sizes.emplace_back(modes[i]->w, modes[i]->h);
+                    }
                 }
+                SDL_free(modes);
             }
             std::pair<int, int> current;
             SDL_GetWindowSize(window, &current.first, &current.second);
@@ -782,15 +792,20 @@ namespace {
                 return;
             }
             if (appliedVSync == -1) {
-                SDL_DisplayMode mode {};
-                if (SDL_GetCurrentDisplayMode(0, &mode) == 0 && mode.refresh_rate >= 30 && mode.refresh_rate <= 240) {
-                    displayRefreshRate = mode.refresh_rate;
+                SDL_DisplayID display = SDL_GetDisplayForWindow(window);
+                if (!display) {
+                    display = SDL_GetPrimaryDisplay();
+                }
+                if (const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(display)) {
+                    if (mode->refresh_rate >= 30.0f && mode->refresh_rate <= 240.0f) {
+                        displayRefreshRate = static_cast<int>(std::lround(mode->refresh_rate));
+                    }
                 }
             }
             int vsync = std::clamp(videoSetting("VSync", 1), 0, 2);
             if (vsync != appliedVSync) {
                 appliedVSync = vsync;
-                if (vsync != 2 || SDL_GL_SetSwapInterval(-1) != 0) {
+                if (vsync != 2 || !SDL_GL_SetSwapInterval(-1)) {
                     SDL_GL_SetSwapInterval(std::min(vsync, 1));
                 }
             }
@@ -1141,27 +1156,27 @@ namespace {
             dx::console::key(key, dx::IST_Axis, delta);
         }
 
-        static constexpr std::array<std::pair<SDL_GameControllerButton, uint8_t>, 20> kControllerButtons {{
-            { SDL_CONTROLLER_BUTTON_A, dx::IK_Joy1 },
-            { SDL_CONTROLLER_BUTTON_B, dx::IK_Joy2 },
-            { SDL_CONTROLLER_BUTTON_X, dx::IK_Joy3 },
-            { SDL_CONTROLLER_BUTTON_Y, dx::IK_Joy4 },
-            { SDL_CONTROLLER_BUTTON_LEFTSHOULDER, dx::IK_Joy5 },
-            { SDL_CONTROLLER_BUTTON_RIGHTSHOULDER, dx::IK_Joy6 },
-            { SDL_CONTROLLER_BUTTON_BACK, dx::IK_Joy7 },
-            { SDL_CONTROLLER_BUTTON_START, dx::IK_Joy8 },
-            { SDL_CONTROLLER_BUTTON_LEFTSTICK, dx::IK_Joy9 },
-            { SDL_CONTROLLER_BUTTON_RIGHTSTICK, dx::IK_Joy10 },
-            { SDL_CONTROLLER_BUTTON_PADDLE1, dx::IK_Joy11 },
-            { SDL_CONTROLLER_BUTTON_PADDLE2, dx::IK_Joy12 },
-            { SDL_CONTROLLER_BUTTON_PADDLE3, dx::IK_Joy13 },
-            { SDL_CONTROLLER_BUTTON_PADDLE4, dx::IK_Joy14 },
-            { SDL_CONTROLLER_BUTTON_MISC1, dx::IK_Joy15 },
-            { SDL_CONTROLLER_BUTTON_TOUCHPAD, dx::IK_Joy16 },
-            { SDL_CONTROLLER_BUTTON_DPAD_UP, dx::IK_JoyPovUp },
-            { SDL_CONTROLLER_BUTTON_DPAD_DOWN, dx::IK_JoyPovDown },
-            { SDL_CONTROLLER_BUTTON_DPAD_LEFT, dx::IK_JoyPovLeft },
-            { SDL_CONTROLLER_BUTTON_DPAD_RIGHT, dx::IK_JoyPovRight },
+        static constexpr std::array<std::pair<SDL_GamepadButton, uint8_t>, 20> kControllerButtons {{
+            { SDL_GAMEPAD_BUTTON_SOUTH, dx::IK_Joy1 },
+            { SDL_GAMEPAD_BUTTON_EAST, dx::IK_Joy2 },
+            { SDL_GAMEPAD_BUTTON_WEST, dx::IK_Joy3 },
+            { SDL_GAMEPAD_BUTTON_NORTH, dx::IK_Joy4 },
+            { SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, dx::IK_Joy5 },
+            { SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, dx::IK_Joy6 },
+            { SDL_GAMEPAD_BUTTON_BACK, dx::IK_Joy7 },
+            { SDL_GAMEPAD_BUTTON_START, dx::IK_Joy8 },
+            { SDL_GAMEPAD_BUTTON_LEFT_STICK, dx::IK_Joy9 },
+            { SDL_GAMEPAD_BUTTON_RIGHT_STICK, dx::IK_Joy10 },
+            { SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1, dx::IK_Joy11 },
+            { SDL_GAMEPAD_BUTTON_LEFT_PADDLE1, dx::IK_Joy12 },
+            { SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2, dx::IK_Joy13 },
+            { SDL_GAMEPAD_BUTTON_LEFT_PADDLE2, dx::IK_Joy14 },
+            { SDL_GAMEPAD_BUTTON_MISC1, dx::IK_Joy15 },
+            { SDL_GAMEPAD_BUTTON_TOUCHPAD, dx::IK_Joy16 },
+            { SDL_GAMEPAD_BUTTON_DPAD_UP, dx::IK_JoyPovUp },
+            { SDL_GAMEPAD_BUTTON_DPAD_DOWN, dx::IK_JoyPovDown },
+            { SDL_GAMEPAD_BUTTON_DPAD_LEFT, dx::IK_JoyPovLeft },
+            { SDL_GAMEPAD_BUTTON_DPAD_RIGHT, dx::IK_JoyPovRight },
         }};
 
         void updateGamepadInfo()
@@ -1170,16 +1185,16 @@ namespace {
                 dx::console::setGamepadInfo("None");
                 return;
             }
-            SDL_GameControllerType padType = SDL_GameControllerGetType(controller);
-            if (padType == SDL_CONTROLLER_TYPE_XBOXONE) {
+            SDL_GamepadType padType = SDL_GetGamepadType(controller);
+            if (padType == SDL_GAMEPAD_TYPE_XBOXONE) {
                 dx::console::setGamepadInfo("XboxOne");
-            } else if (padType == SDL_CONTROLLER_TYPE_XBOX360) {
+            } else if (padType == SDL_GAMEPAD_TYPE_XBOX360) {
                 dx::console::setGamepadInfo("Xbox360");
-            } else if (padType == SDL_CONTROLLER_TYPE_PS4) {
+            } else if (padType == SDL_GAMEPAD_TYPE_PS4) {
                 dx::console::setGamepadInfo("PS4");
-            } else if (padType == SDL_CONTROLLER_TYPE_PS5) {
+            } else if (padType == SDL_GAMEPAD_TYPE_PS5) {
                 dx::console::setGamepadInfo("PS5");
-            } else if (padType == SDL_CONTROLLER_TYPE_NINTENDO_SWITCH_PRO) {
+            } else if (padType == SDL_GAMEPAD_TYPE_NINTENDO_SWITCH_PRO) {
                 dx::console::setGamepadInfo("SwitchPro");
             } else {
                 dx::console::setGamepadInfo("Unknown");
@@ -1190,9 +1205,9 @@ namespace {
         {
             gyroAim.setController(nullptr);
             if (controller) {
-                SDL_GameControllerClose(controller);
+                SDL_CloseGamepad(controller);
                 controller = nullptr;
-                controllerId = -1;
+                controllerId = 0;
             }
         }
 
@@ -1228,51 +1243,37 @@ namespace {
             dx::console::setGamepadRawMags(0.0f, 0.0f);
         }
 
-        void openControllerByIndex(int index)
+        void openControllerById(SDL_JoystickID jid)
         {
-            if (!SDL_IsGameController(index)) {
+            if (jid == 0 || (controller && jid == controllerId)) {
                 return;
             }
-            SDL_GameController* opened = SDL_GameControllerOpen(index);
+            if (!SDL_IsGamepad(jid)) {
+                return;
+            }
+            SDL_Gamepad* opened = SDL_OpenGamepad(jid);
             if (!opened) {
-                return;
-            }
-            SDL_Joystick* joy = SDL_GameControllerGetJoystick(opened);
-            SDL_JoystickID jid = joy ? SDL_JoystickInstanceID(joy) : -1;
-            if (controller && jid == controllerId) {
-                SDL_GameControllerClose(opened);
                 return;
             }
             releaseGamepadInputs();
             closeController();
             controller = opened;
-            controllerId = jid;
+            controllerId = SDL_GetGamepadID(controller);
             updateGamepadInfo();
             gyroAim.setController(controller);
         }
 
-        void openControllerById(SDL_JoystickID jid)
-        {
-            if (controller && jid == controllerId) {
-                return;
-            }
-            int count = SDL_NumJoysticks();
-            for (int i = 0; i < count; i++) {
-                if (SDL_IsGameController(i) && SDL_JoystickGetDeviceInstanceID(i) == jid) {
-                    openControllerByIndex(i);
-                    return;
-                }
-            }
-        }
-
         void initControllers()
         {
-            int count = SDL_NumJoysticks();
-            for (int i = 0; i < count; i++) {
-                if (SDL_IsGameController(i)) {
-                    openControllerByIndex(i);
-                    break;
+            int count = 0;
+            if (SDL_JoystickID* gamepads = SDL_GetGamepads(&count)) {
+                for (int i = 0; i < count; i++) {
+                    openControllerById(gamepads[i]);
+                    if (controller) {
+                        break;
+                    }
                 }
+                SDL_free(gamepads);
             }
             if (!controller) {
                 updateGamepadInfo();
@@ -1379,7 +1380,7 @@ namespace {
         {
             int drawWidth = 0;
             int drawHeight = 0;
-            SDL_GL_GetDrawableSize(window, &drawWidth, &drawHeight);
+            SDL_GetWindowSizeInPixels(window, &drawWidth, &drawHeight);
             if (drawWidth <= 0 || drawHeight <= 0) {
                 return;
             }
@@ -1388,10 +1389,10 @@ namespace {
                 touchOverlay.handleTouchEvent(event, drawWidth, drawHeight, touchCallbacks());
                 return;
             }
-            SDL_FingerID fid = event.tfinger.fingerId;
+            SDL_FingerID fid = event.tfinger.fingerID;
             if (dx::extension::wantsMouse() || dx::extension::isModalOpen()) {
                 dx::extension::setTouchInputActive(true);
-                if (event.type == SDL_FINGERDOWN) {
+                if (event.type == SDL_EVENT_FINGER_DOWN) {
                     touchOverlay.markTouchActive();
                 }
                 float kx = 0.0f;
@@ -1404,7 +1405,7 @@ namespace {
                 }
                 float px = event.tfinger.x * static_cast<float>(drawWidth);
                 float py = event.tfinger.y * static_cast<float>(drawHeight);
-                if (event.type == SDL_FINGERDOWN) {
+                if (event.type == SDL_EVENT_FINGER_DOWN) {
                     if (hasMenuFinger && fid != menuFinger) {
                         dx::extension::mouseButton(dx::IK_LeftMouse, false);
                     }
@@ -1414,13 +1415,13 @@ namespace {
                     dx::extension::mouseButton(dx::IK_LeftMouse, true);
 #ifdef __ANDROID__
                     if (dx::extension::isEditFocused()) {
-                        SDL_StartTextInput();
+                        SDL_StartTextInput(window);
                         textInputRequested = true;
                     }
 #endif
-                } else if (event.type == SDL_FINGERMOTION && hasMenuFinger && fid == menuFinger) {
+                } else if (event.type == SDL_EVENT_FINGER_MOTION && hasMenuFinger && fid == menuFinger) {
                     dx::extension::mouseMove(px, py);
-                } else if (event.type == SDL_FINGERUP && hasMenuFinger && fid == menuFinger) {
+                } else if (event.type == SDL_EVENT_FINGER_UP && hasMenuFinger && fid == menuFinger) {
                     dx::extension::mouseMove(px, py);
                     dx::extension::mouseButton(dx::IK_LeftMouse, false);
                     hasMenuFinger = false;
@@ -1439,7 +1440,7 @@ namespace {
             uint32_t buttonsNow = 0;
             bool padActivity = false;
             for (size_t i = 0; i < kControllerButtons.size(); i++) {
-                bool nowDown = SDL_GameControllerGetButton(controller, kControllerButtons[i].first) != 0;
+                bool nowDown = SDL_GetGamepadButton(controller, kControllerButtons[i].first);
                 uint32_t bit = 1u << static_cast<uint32_t>(i);
                 if (nowDown) {
                     buttonsNow |= bit;
@@ -1466,12 +1467,12 @@ namespace {
                 return std::clamp(-static_cast<int>(raw), -32767, 32767);
             };
 
-            int lx = clampX(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTX));
-            int ly = negateY(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_LEFTY));
-            int rx = clampX(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTX));
-            int ry = negateY(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_RIGHTY));
-            int trigL = std::clamp(static_cast<int>(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERLEFT)), 0, 32767);
-            int trigR = std::clamp(static_cast<int>(SDL_GameControllerGetAxis(controller, SDL_CONTROLLER_AXIS_TRIGGERRIGHT)), 0, 32767);
+            int lx = clampX(SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_LEFTX));
+            int ly = negateY(SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_LEFTY));
+            int rx = clampX(SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_RIGHTX));
+            int ry = negateY(SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_RIGHTY));
+            int trigL = std::clamp(static_cast<int>(SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)), 0, 32767);
+            int trigR = std::clamp(static_cast<int>(SDL_GetGamepadAxis(controller, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)), 0, 32767);
 
             float rawLMag = std::min(1.0f, std::hypot(static_cast<float>(lx), static_cast<float>(ly)) / 32767.0f);
             float rawRMag = std::min(1.0f, std::hypot(static_cast<float>(rx), static_cast<float>(ry)) / 32767.0f);
@@ -1504,13 +1505,13 @@ namespace {
 
             if (dx::extension::isModalOpen()) {
                 uint8_t dpadDir = dx::IK_None;
-                if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_UP)) {
+                if (SDL_GetGamepadButton(controller, SDL_GAMEPAD_BUTTON_DPAD_UP)) {
                     dpadDir = dx::IK_JoyPovUp;
-                } else if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_DOWN)) {
+                } else if (SDL_GetGamepadButton(controller, SDL_GAMEPAD_BUTTON_DPAD_DOWN)) {
                     dpadDir = dx::IK_JoyPovDown;
-                } else if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_LEFT)) {
+                } else if (SDL_GetGamepadButton(controller, SDL_GAMEPAD_BUTTON_DPAD_LEFT)) {
                     dpadDir = dx::IK_JoyPovLeft;
-                } else if (SDL_GameControllerGetButton(controller, SDL_CONTROLLER_BUTTON_DPAD_RIGHT)) {
+                } else if (SDL_GetGamepadButton(controller, SDL_GAMEPAD_BUTTON_DPAD_RIGHT)) {
                     dpadDir = dx::IK_JoyPovRight;
                 }
                 uint8_t stickDir = dx::IK_None;
@@ -1563,17 +1564,17 @@ namespace {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
                 switch (event.type) {
-                case SDL_QUIT:
+                case SDL_EVENT_QUIT:
                     running = false;
                     break;
-                case SDL_APP_WILLENTERBACKGROUND:
+                case SDL_EVENT_WILL_ENTER_BACKGROUND:
                     inBackground = true;
                     gyroAim.setSuspended(true);
                     dx::audio::suspend();
                     dx::config::system().save();
                     dx::config::user().save();
                     break;
-                case SDL_APP_DIDENTERFOREGROUND:
+                case SDL_EVENT_DID_ENTER_FOREGROUND:
                     inBackground = false;
                     last = SDL_GetPerformanceCounter();
                     frameDeadline = 0;
@@ -1581,61 +1582,58 @@ namespace {
                     gyroAim.refreshDisplayRotation();
                     dx::audio::resume();
                     break;
-                case SDL_WINDOWEVENT:
-                    if (event.window.event == SDL_WINDOWEVENT_RESIZED || event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
-                        gyroAim.refreshDisplayRotation();
+                case SDL_EVENT_WINDOW_RESIZED:
+                case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+                    gyroAim.refreshDisplayRotation();
+                    break;
+                case SDL_EVENT_DISPLAY_ORIENTATION:
+                    gyroAim.refreshDisplayRotation();
+                    break;
+                case SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+                    if (controller && event.gsensor.which == controllerId) {
+                        gyroAim.handleControllerSensorEvent(event.gsensor);
                     }
                     break;
-                case SDL_DISPLAYEVENT:
-                    if (event.display.event == SDL_DISPLAYEVENT_ORIENTATION) {
-                        gyroAim.refreshDisplayRotation();
-                    }
-                    break;
-                case SDL_CONTROLLERSENSORUPDATE:
-                    if (controller && event.csensor.which == controllerId) {
-                        gyroAim.handleControllerSensorEvent(event.csensor);
-                    }
-                    break;
-                case SDL_CONTROLLERDEVICEADDED:
+                case SDL_EVENT_GAMEPAD_ADDED:
                     if (!controller) {
-                        openControllerByIndex(event.cdevice.which);
+                        openControllerById(event.gdevice.which);
                     }
                     break;
-                case SDL_CONTROLLERDEVICEREMOVED:
-                    if (controller && event.cdevice.which == controllerId) {
+                case SDL_EVENT_GAMEPAD_REMOVED:
+                    if (controller && event.gdevice.which == controllerId) {
                         releaseGamepadInputs();
                         closeController();
                         initControllers();
                     }
                     break;
-                case SDL_CONTROLLERBUTTONDOWN:
-                    openControllerById(event.cbutton.which);
+                case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+                    openControllerById(event.gbutton.which);
                     break;
-                case SDL_FINGERDOWN:
-                case SDL_FINGERMOTION:
-                case SDL_FINGERUP:
+                case SDL_EVENT_FINGER_DOWN:
+                case SDL_EVENT_FINGER_MOTION:
+                case SDL_EVENT_FINGER_UP:
                     handleTouchEvent(event);
                     break;
-                case SDL_KEYDOWN:
-                    if (touchOverlay.handleEditorPhysicalKey(event.key.keysym.sym, true)) {
+                case SDL_EVENT_KEY_DOWN:
+                    if (touchOverlay.handleEditorPhysicalKey(event.key.key, true)) {
                         break;
                     }
-                    if (event.key.keysym.sym != SDLK_VOLUMEUP && event.key.keysym.sym != SDLK_VOLUMEDOWN && event.key.keysym.sym != SDLK_AC_BACK) {
+                    if (event.key.key != SDLK_VOLUMEUP && event.key.key != SDLK_VOLUMEDOWN && event.key.key != SDLK_AC_BACK) {
                         touchOverlay.onPhysicalInput(touchCallbacks());
                     }
                     if (!event.key.repeat) {
-                        handleKey(translateKey(event.key.keysym.sym), true);
-                    } else if (!consoleKeyEvent(translateKey(event.key.keysym.sym), dx::IST_Hold, 0)) {
-                        dx::extension::keyEvent(translateKey(event.key.keysym.sym), dx::IST_Hold, 0);
+                        handleKey(translateKey(event.key.key), true);
+                    } else if (!consoleKeyEvent(translateKey(event.key.key), dx::IST_Hold, 0)) {
+                        dx::extension::keyEvent(translateKey(event.key.key), dx::IST_Hold, 0);
                     }
                     break;
-                case SDL_KEYUP:
-                    if (touchOverlay.handleEditorPhysicalKey(event.key.keysym.sym, false)) {
+                case SDL_EVENT_KEY_UP:
+                    if (touchOverlay.handleEditorPhysicalKey(event.key.key, false)) {
                         break;
                     }
-                    handleKey(translateKey(event.key.keysym.sym), false);
+                    handleKey(translateKey(event.key.key), false);
                     break;
-                case SDL_TEXTINPUT:
+                case SDL_EVENT_TEXT_INPUT:
                     if (touchOverlay.isEditorOpen()) {
                         break;
                     }
@@ -1643,7 +1641,7 @@ namespace {
                         charEvent(*c);
                     }
                     break;
-                case SDL_MOUSEMOTION:
+                case SDL_EVENT_MOUSE_MOTION:
                     if (event.motion.which == SDL_TOUCH_MOUSEID || touchOverlay.isEditorOpen()) {
                         break;
                     }
@@ -1655,40 +1653,40 @@ namespace {
                         SDL_GetWindowSize(window, &width, &height);
                         int drawWidth = 0;
                         int drawHeight = 0;
-                        SDL_GL_GetDrawableSize(window, &drawWidth, &drawHeight);
+                        SDL_GetWindowSizeInPixels(window, &drawWidth, &drawHeight);
                         float scaleX = width > 0 ? static_cast<float>(drawWidth) / static_cast<float>(width) : 1.0f;
                         float scaleY = height > 0 ? static_cast<float>(drawHeight) / static_cast<float>(height) : 1.0f;
-                        dx::extension::mouseMove(static_cast<float>(event.motion.x) * scaleX, static_cast<float>(event.motion.y) * scaleY);
+                        dx::extension::mouseMove(event.motion.x * scaleX, event.motion.y * scaleY);
                     } else {
-                        dx::console::key(dx::IK_MouseX, dx::IST_Axis, static_cast<float>(event.motion.xrel));
-                        dx::console::key(dx::IK_MouseY, dx::IST_Axis, static_cast<float>(-event.motion.yrel));
+                        dx::console::key(dx::IK_MouseX, dx::IST_Axis, event.motion.xrel);
+                        dx::console::key(dx::IK_MouseY, dx::IST_Axis, -event.motion.yrel);
                     }
                     break;
-                case SDL_MOUSEBUTTONDOWN:
-                case SDL_MOUSEBUTTONUP: {
+                case SDL_EVENT_MOUSE_BUTTON_DOWN:
+                case SDL_EVENT_MOUSE_BUTTON_UP: {
                     if (event.button.which == SDL_TOUCH_MOUSEID || touchOverlay.isEditorOpen()) {
                         break;
                     }
-                    if (event.type == SDL_MOUSEBUTTONDOWN) {
+                    if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN) {
                         touchOverlay.onPhysicalInput(touchCallbacks());
                     }
                     dx::extension::setTouchInputActive(false);
                     uint8_t key = translateButton(event.button.button);
-                    bool pressed = event.type == SDL_MOUSEBUTTONDOWN;
+                    bool pressed = event.type == SDL_EVENT_MOUSE_BUTTON_DOWN;
                     if ((dx::extension::wantsMouse() || dx::extension::isModalOpen()) && dx::extension::mouseButton(key, pressed)) {
                         break;
                     }
                     handleKey(key, pressed);
                     break;
                 }
-                case SDL_MOUSEWHEEL: {
+                case SDL_EVENT_MOUSE_WHEEL: {
                     if (event.wheel.which == SDL_TOUCH_MOUSEID || touchOverlay.isEditorOpen()) {
                         break;
                     }
                     touchOverlay.onPhysicalInput(touchCallbacks());
-                    uint8_t key = event.wheel.y > 0 ? dx::IK_MouseWheelUp : dx::IK_MouseWheelDown;
-                    if (event.wheel.y != 0) {
-                        dx::console::key(dx::IK_MouseW, dx::IST_Axis, static_cast<float>(event.wheel.y * 120));
+                    if (event.wheel.y != 0.0f) {
+                        uint8_t key = event.wheel.y > 0.0f ? dx::IK_MouseWheelUp : dx::IK_MouseWheelDown;
+                        dx::console::key(dx::IK_MouseW, dx::IST_Axis, event.wheel.y * 120.0f);
                         handleKey(key, true);
                         handleKey(key, false);
                     }
@@ -1961,7 +1959,7 @@ namespace {
             if ((frame % 10) != 0) {
                 return;
             }
-            const char* extPath = SDL_AndroidGetExternalStoragePath();
+            const char* extPath = SDL_GetAndroidExternalStoragePath();
             if (!extPath || !*extPath) {
                 return;
             }
@@ -2155,7 +2153,7 @@ namespace {
             if (std::FILE* out = std::fopen("/storage/emulated/0/OpenDE/bench_results.txt", "ab")) {
                 std::fprintf(out, "%s\n", line);
                 std::fclose(out);
-            } else if (const char* extPath = SDL_AndroidGetExternalStoragePath()) {
+            } else if (const char* extPath = SDL_GetAndroidExternalStoragePath()) {
                 std::string outPath = std::string(extPath) + "/bench_results.txt";
                 if (std::FILE* out2 = std::fopen(outPath.c_str(), "ab")) {
                     std::fprintf(out2, "%s\n", line);
@@ -2190,7 +2188,7 @@ namespace {
             bool gui = dx::extension::wantsMouse() || modal || touchOverlay.isEditorOpen();
             if (gui != guiMode) {
                 guiMode = gui;
-                SDL_SetRelativeMouseMode(gui ? SDL_FALSE : SDL_TRUE);
+                SDL_SetWindowRelativeMouseMode(window, !gui);
 #ifndef __ANDROID__
                 float cursorX = 0;
                 float cursorY = 0;
@@ -2200,9 +2198,9 @@ namespace {
                     SDL_GetWindowSize(window, &windowWidth, &windowHeight);
                     int drawWidth = 0;
                     int drawHeight = 0;
-                    SDL_GL_GetDrawableSize(window, &drawWidth, &drawHeight);
+                    SDL_GetWindowSizeInPixels(window, &drawWidth, &drawHeight);
                     if (drawWidth > 0 && drawHeight > 0) {
-                        SDL_WarpMouseInWindow(window, static_cast<int>(cursorX * static_cast<float>(windowWidth) / static_cast<float>(drawWidth)), static_cast<int>(cursorY * static_cast<float>(windowHeight) / static_cast<float>(drawHeight)));
+                        SDL_WarpMouseInWindow(window, cursorX * static_cast<float>(windowWidth) / static_cast<float>(drawWidth), cursorY * static_cast<float>(windowHeight) / static_cast<float>(drawHeight));
                     }
                 }
 #endif
@@ -2231,9 +2229,9 @@ namespace {
                     if (wantTextInput != textInputRequested) {
                         textInputRequested = wantTextInput;
                         if (wantTextInput) {
-                            SDL_StartTextInput();
+                            SDL_StartTextInput(window);
                         } else {
-                            SDL_StopTextInput();
+                            SDL_StopTextInput(window);
                         }
                     }
                 }
@@ -2242,7 +2240,7 @@ namespace {
                 if (console) {
                     dx::vm::Call(console, dx::Name("Tick")).f(delta).run();
                     int consoleHeight = 0;
-                    SDL_GL_GetDrawableSize(window, nullptr, &consoleHeight);
+                    SDL_GetWindowSizeInPixels(window, nullptr, &consoleHeight);
                     dx::console::ConsoleLines(console) = static_cast<int32_t>(std::min(dx::console::ConsolePos(console) * static_cast<float>(consoleHeight), static_cast<float>(consoleHeight)));
                 }
                 handleTravel();
@@ -2250,7 +2248,7 @@ namespace {
             uint64_t tTick1 = SDL_GetPerformanceCounter();
             int width = 0;
             int height = 0;
-            SDL_GL_GetDrawableSize(window, &width, &height);
+            SDL_GetWindowSizeInPixels(window, &width, &height);
             uint64_t tRender0 = SDL_GetPerformanceCounter();
             {
                 DX_TRACE_SCOPE("DX_Render");
@@ -2412,8 +2410,8 @@ namespace {
         int frame = 0;
         bool guiMode = true;
         bool wasModalOpen = false;
-        SDL_GameController* controller = nullptr;
-        SDL_JoystickID controllerId = -1;
+        SDL_Gamepad* controller = nullptr;
+        SDL_JoystickID controllerId = 0;
         uint32_t prevControllerButtons = 0;
         float prevLeftStickX = 0.0f;
         float prevLeftStickY = 0.0f;
@@ -2454,9 +2452,9 @@ int main(int argc, char** argv)
 #ifdef __ANDROID__
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 #endif
-    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK | SDL_INIT_SENSOR) != 0) {
-        if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK) != 0) {
-            if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS) != 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK | SDL_INIT_SENSOR)) {
+        if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | SDL_INIT_GAMEPAD | SDL_INIT_JOYSTICK)) {
+            if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS)) {
                 std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
                 return 1;
             }
@@ -2473,7 +2471,7 @@ int main(int argc, char** argv)
 #endif
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
     SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
-    SDL_Window* window = SDL_CreateWindow("Deus Ex", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, options.width, options.height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    SDL_Window* window = SDL_CreateWindow("Deus Ex", options.width, options.height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return 1;
@@ -2489,9 +2487,9 @@ int main(int argc, char** argv)
     }
     SDL_GL_SetSwapInterval(options.frames >= 0 ? 0 : 1);
 #ifndef __ANDROID__
-    SDL_StartTextInput();
+    SDL_StartTextInput(window);
 #endif
-    SDL_ShowCursor(SDL_DISABLE);
+    SDL_HideCursor();
     dx::vm::setCriticalHandler([window](const std::string& message) {
         std::fprintf(stderr, "Critical Error: %s\n", message.c_str());
         std::fflush(stderr);
@@ -2547,7 +2545,7 @@ int main(int argc, char** argv)
         result = 1;
     }
     dx::audio::shutdown();
-    SDL_GL_DeleteContext(context);
+    SDL_GL_DestroyContext(context);
     SDL_DestroyWindow(window);
     SDL_Quit();
     return result;

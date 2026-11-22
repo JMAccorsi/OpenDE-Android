@@ -1,12 +1,10 @@
-#define SDL_MAIN_HANDLED
-
 #include "core/objects.h"
 #include "engine/mesh.h"
 #include "engine/props_engine.h"
 #include "engine/world.h"
 #include "render/scene_renderer.h"
 
-#include <SDL.h>
+#include <SDL3/SDL.h>
 #include <catch_amalgamated.hpp>
 #include <glad/gl.h>
 
@@ -23,21 +21,20 @@ namespace {
 
         OffscreenContext()
         {
-            SDL_SetMainReady();
-            if (SDL_InitSubSystem(SDL_INIT_VIDEO) != 0) {
+            if (!SDL_InitSubSystem(SDL_INIT_VIDEO)) {
                 return;
             }
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
             SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
             SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-            window = SDL_CreateWindow("mesh", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, frameWidth, frameHeight, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
+            window = SDL_CreateWindow("mesh", frameWidth, frameHeight, SDL_WINDOW_OPENGL | SDL_WINDOW_HIDDEN);
             if (!window) {
                 return;
             }
             context = SDL_GL_CreateContext(window);
             if (context && !gladLoadGL(reinterpret_cast<GLADloadfunc>(SDL_GL_GetProcAddress))) {
-                SDL_GL_DeleteContext(context);
+                SDL_GL_DestroyContext(context);
                 context = nullptr;
             }
         }
@@ -45,7 +42,7 @@ namespace {
         ~OffscreenContext()
         {
             if (context) {
-                SDL_GL_DeleteContext(context);
+                SDL_GL_DestroyContext(context);
             }
             if (window) {
                 SDL_DestroyWindow(window);

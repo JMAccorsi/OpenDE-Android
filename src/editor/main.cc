@@ -1,5 +1,6 @@
 #include "editor/editor.h"
 
+#include <SDL3/SDL_main.h>
 #include <tabler_icons.h>
 
 namespace {
@@ -37,7 +38,7 @@ namespace {
 int main(int argc, char** argv)
 {
     dx::editor::Options options = parseOptions(argc, argv);
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return 1;
     }
@@ -45,7 +46,7 @@ int main(int argc, char** argv)
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 3);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
     SDL_GL_SetAttribute(SDL_GL_DEPTH_SIZE, 24);
-    SDL_Window* window = SDL_CreateWindow("Deus Ex UnrealEd", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, options.width, options.height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
+    SDL_Window* window = SDL_CreateWindow("Deus Ex UnrealEd", options.width, options.height, SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!window) {
         std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
         return 1;
@@ -66,12 +67,11 @@ int main(int argc, char** argv)
     iconConfig.GlyphMinAdvanceX = 13.0f;
     iconConfig.GlyphOffset = ImVec2(0.0f, 1.0f);
     ImGui::GetIO().Fonts->AddFontFromMemoryCompressedTTF(TablerIcons_compressed_data, static_cast<int>(TablerIcons_compressed_size), 13.0f, &iconConfig);
-    ImGui_ImplSDL2_InitForOpenGL(window, context);
+    ImGui_ImplSDL3_InitForOpenGL(window, context);
     ImGui_ImplOpenGL3_Init("#version 330 core");
     std::filesystem::path gamePath = "deusex";
-    if (char* base = SDL_GetBasePath()) {
+    if (const char* base = SDL_GetBasePath()) {
         gamePath = std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(base))) / "deusex";
-        SDL_free(base);
     }
     int result = 0;
     try {
@@ -87,9 +87,9 @@ int main(int argc, char** argv)
         result = 1;
     }
     ImGui_ImplOpenGL3_Shutdown();
-    ImGui_ImplSDL2_Shutdown();
+    ImGui_ImplSDL3_Shutdown();
     ImGui::DestroyContext();
-    SDL_GL_DeleteContext(context);
+    SDL_GL_DestroyContext(context);
     SDL_DestroyWindow(window);
     SDL_Quit();
     return result;

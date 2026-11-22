@@ -3,10 +3,10 @@
 #include "core/objects.h"
 #include "engine/package.h"
 
-#include <SDL_filesystem.h>
-#include <SDL_stdinc.h>
+#include <SDL3/SDL_filesystem.h>
+#include <SDL3/SDL_stdinc.h>
 #ifdef __ANDROID__
-#include <SDL_system.h>
+#include <SDL3/SDL_system.h>
 #endif
 
 #include <algorithm>
@@ -366,9 +366,14 @@ namespace dx {
     }
 
     namespace config {
-        std::filesystem::path fromUtf8(char* text)
+        std::filesystem::path fromUtf8(const char* text)
         {
-            std::filesystem::path path(std::u8string(reinterpret_cast<const char8_t*>(text)));
+            return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(text)));
+        }
+
+        std::filesystem::path takeUtf8(char* text)
+        {
+            std::filesystem::path path = fromUtf8(text);
             SDL_free(text);
             return path;
         }
@@ -490,10 +495,10 @@ namespace dx {
         std::filesystem::path findGameRoot(const std::filesystem::path& fallback)
         {
 #ifdef __ANDROID__
-            if (auto cached = readCachedGameRoot(SDL_AndroidGetExternalStoragePath()); !cached.empty()) {
+            if (auto cached = readCachedGameRoot(SDL_GetAndroidExternalStoragePath()); !cached.empty()) {
                 return cached;
             }
-            if (auto cached = readCachedGameRoot(SDL_AndroidGetInternalStoragePath()); !cached.empty()) {
+            if (auto cached = readCachedGameRoot(SDL_GetAndroidInternalStoragePath()); !cached.empty()) {
                 return cached;
             }
 #endif
@@ -503,7 +508,7 @@ namespace dx {
             candidates.emplace_back("/sdcard/OpenDE");
             candidates.emplace_back("/storage/emulated/0/DeusEx");
             candidates.emplace_back("/sdcard/DeusEx");
-            if (const char* ext = SDL_AndroidGetExternalStoragePath()) {
+            if (const char* ext = SDL_GetAndroidExternalStoragePath()) {
                 std::filesystem::path extPath(ext);
                 candidates.push_back(extPath / "DeusEx");
                 candidates.push_back(extPath);
@@ -516,7 +521,7 @@ namespace dx {
             if (const char* value = std::getenv("APPIMAGE")) {
                 candidates.push_back(std::filesystem::path(value).parent_path() / "game-data");
             }
-            if (char* base = SDL_GetBasePath()) {
+            if (const char* base = SDL_GetBasePath()) {
                 candidates.push_back(fromUtf8(base) / "game-data");
             }
             for (const std::filesystem::path& root : steamRoots()) {
@@ -544,7 +549,7 @@ namespace dx {
 #ifdef __ANDROID__
             std::error_code error;
             std::filesystem::path directory("/storage/emulated/0/OpenDE/User");
-            if (const char* ext = SDL_AndroidGetExternalStoragePath()) {
+            if (const char* ext = SDL_GetAndroidExternalStoragePath()) {
                 std::filesystem::path extDir(ext);
                 std::filesystem::create_directories(extDir, error);
                 if (!error) {
@@ -562,7 +567,7 @@ namespace dx {
 #ifdef _WIN32
             if (!xdg) {
                 if (char* pref = SDL_GetPrefPath("", "deusex")) {
-                    std::filesystem::path directory = fromUtf8(pref);
+                    std::filesystem::path directory = takeUtf8(pref);
                     if (!state().modDirectory.empty()) {
                         directory /= "mods";
                         directory /= state().modDirectory.filename();

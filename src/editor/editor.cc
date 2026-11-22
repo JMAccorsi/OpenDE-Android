@@ -666,8 +666,8 @@ namespace dx::editor {
         while (running) {
             SDL_Event event;
             while (SDL_PollEvent(&event)) {
-                ImGui_ImplSDL2_ProcessEvent(&event);
-                if (event.type == SDL_QUIT) {
+                ImGui_ImplSDL3_ProcessEvent(&event);
+                if (event.type == SDL_EVENT_QUIT) {
                     running = false;
                 }
             }
@@ -678,9 +678,9 @@ namespace dx::editor {
             }
             int width = 0;
             int height = 0;
-            SDL_GL_GetDrawableSize(window, &width, &height);
+            SDL_GetWindowSizeInPixels(window, &width, &height);
             ImGui_ImplOpenGL3_NewFrame();
-            ImGui_ImplSDL2_NewFrame();
+            ImGui_ImplSDL3_NewFrame();
             applyInput(frameCount);
             ImGui::NewFrame();
             frame(width, height);

@@ -569,7 +569,7 @@ namespace game {
     {
         float px = event.tfinger.x * static_cast<float>(drawWidth);
         float py = event.tfinger.y * static_cast<float>(drawHeight);
-        SDL_FingerID fid = event.tfinger.fingerId;
+        SDL_FingerID fid = event.tfinger.fingerID;
 
         float tx = 0.0f;
         float ty = 0.0f;
@@ -608,7 +608,7 @@ namespace game {
             return -1;
         };
 
-        if (event.type == SDL_FINGERDOWN) {
+        if (event.type == SDL_EVENT_FINGER_DOWN) {
             int tool = hitToolbarItem(px, py);
             if (tool >= 0) {
                 editorPendingTool_ = tool;
@@ -627,13 +627,13 @@ namespace game {
             }
             return true;
         }
-        if (event.type == SDL_FINGERMOTION && fid == editorFinger_ && editorDragging_) {
+        if (event.type == SDL_EVENT_FINGER_MOTION && fid == editorFinger_ && editorDragging_) {
             TouchControlLayout& cur = layouts_[static_cast<size_t>(selectedControl_)];
             cur.cx = std::clamp(event.tfinger.x + editorDragOffsetX_, 0.04f, 0.96f);
             cur.cy = std::clamp(event.tfinger.y + editorDragOffsetY_, 0.05f, 0.95f);
             return true;
         }
-        if (event.type == SDL_FINGERUP && fid == editorFinger_) {
+        if (event.type == SDL_EVENT_FINGER_UP && fid == editorFinger_) {
             if (editorDragging_) {
                 editorDragging_ = false;
                 return true;
@@ -687,14 +687,14 @@ namespace game {
         return true;
     }
 
-    bool TouchOverlayManager::handleEditorControllerButton(SDL_GameControllerButton button, bool pressed)
+    bool TouchOverlayManager::handleEditorControllerButton(SDL_GamepadButton button, bool pressed)
     {
         if (!editorOpen_) {
             return false;
         }
-        if (pressed && (button == SDL_CONTROLLER_BUTTON_B || button == SDL_CONTROLLER_BUTTON_BACK)) {
+        if (pressed && (button == SDL_GAMEPAD_BUTTON_EAST || button == SDL_GAMEPAD_BUTTON_BACK)) {
             closeEditor(false);
-        } else if (pressed && button == SDL_CONTROLLER_BUTTON_START) {
+        } else if (pressed && button == SDL_GAMEPAD_BUTTON_START) {
             closeEditor(true);
         }
         return true;
@@ -712,11 +712,11 @@ namespace game {
             return false;
         }
 
-        const SDL_FingerID fid = event.tfinger.fingerId;
+        const SDL_FingerID fid = event.tfinger.fingerID;
         const float x = event.tfinger.x;
         const float y = event.tfinger.y;
 
-        if (event.type == SDL_FINGERDOWN) {
+        if (event.type == SDL_EVENT_FINGER_DOWN) {
             const bool justWoke = !visible_;
             visible_ = true;
 
@@ -796,12 +796,12 @@ namespace game {
                 lookStartX_ = x;
                 lookStartY_ = y;
                 lookMaxDistSq_ = 0.0f;
-                lookDownTicks_ = SDL_GetTicks64();
+                lookDownTicks_ = SDL_GetTicks();
             }
             return true;
         }
 
-        if (event.type == SDL_FINGERMOTION) {
+        if (event.type == SDL_EVENT_FINGER_MOTION) {
             if (hasStickFinger_ && fid == stickFinger_) {
                 stickCurX_ = x;
                 stickCurY_ = y;
@@ -830,7 +830,7 @@ namespace game {
             return true;
         }
 
-        if (event.type == SDL_FINGERUP) {
+        if (event.type == SDL_EVENT_FINGER_UP) {
             if (hasStickFinger_ && fid == stickFinger_) {
                 hasStickFinger_ = false;
                 return true;
@@ -868,7 +868,7 @@ namespace game {
             }
             if (hasLookFinger_ && fid == lookFinger_) {
                 hasLookFinger_ = false;
-                if (lookCanQuickClick_ && (SDL_GetTicks64() - lookDownTicks_) < 210 && lookMaxDistSq_ < (0.025f * 0.025f) && cb.onQuickRightClick) {
+                if (lookCanQuickClick_ && (SDL_GetTicks() - lookDownTicks_) < 210 && lookMaxDistSq_ < (0.025f * 0.025f) && cb.onQuickRightClick) {
                     cb.onQuickRightClick();
                 }
                 lookCanQuickClick_ = false;
@@ -906,18 +906,18 @@ namespace game {
         const float py = event.tfinger.y * static_cast<float>(drawHeight);
         const float pad = 6.0f;
         const bool inBox = px >= bx - pad && px <= bx + bw + pad && py >= by - pad && py <= by + bh + pad;
-        if (event.type == SDL_FINGERDOWN) {
+        if (event.type == SDL_EVENT_FINGER_DOWN) {
             if (inBox) {
                 keypadExitDown_ = true;
-                keypadExitFinger_ = event.tfinger.fingerId;
+                keypadExitFinger_ = event.tfinger.fingerID;
                 return true;
             }
             return false;
         }
-        if (event.type == SDL_FINGERMOTION) {
-            return keypadExitDown_ && event.tfinger.fingerId == keypadExitFinger_;
+        if (event.type == SDL_EVENT_FINGER_MOTION) {
+            return keypadExitDown_ && event.tfinger.fingerID == keypadExitFinger_;
         }
-        if (event.type == SDL_FINGERUP && keypadExitDown_ && event.tfinger.fingerId == keypadExitFinger_) {
+        if (event.type == SDL_EVENT_FINGER_UP && keypadExitDown_ && event.tfinger.fingerID == keypadExitFinger_) {
             keypadExitDown_ = false;
             if (inBox && onClose) {
                 onClose();

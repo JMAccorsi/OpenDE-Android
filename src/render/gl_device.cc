@@ -2,7 +2,7 @@
 
 #include <glad/gl.h>
 #ifdef __ANDROID__
-#include <SDL_log.h>
+#include <SDL3/SDL_log.h>
 #endif
 
 namespace dx {
