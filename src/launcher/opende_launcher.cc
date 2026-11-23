@@ -2263,8 +2263,8 @@ namespace game {
             }
             dxl_cut_top(&in, 12.0f);
             dxl_paragraph(ui, in, DXL_FONT_SMALL,
-                tr("DXLauncher UI components adapted from JuggyMcNutty/deusex-launcher (GPL/MIT-compatible assets & Noto/Barlow fonts).",
-                   "Interface DXLauncher adaptada de JuggyMcNutty/deusex-launcher com suporte nativo a toque, giroscópio e controles Android."),
+                tr("Engine: jarmitage99/OpenDE  |  Launcher UI: JuggyMcNutty/deusex-launcher  |  Gamepad Mod: dsgls/DXController  |  Steam: Longi94/JavaSteam.",
+                   "Motor: jarmitage99/OpenDE  |  Interface: JuggyMcNutty/deusex-launcher  |  Controle: dsgls/DXController  |  Steam: Longi94/JavaSteam."),
                 t->help);
 
             if (dxl_button(ui, "about back", dxl_cut_left(&backBar, 160.0f), tr("Back", "Voltar"), DXL_W_PRIMARY) || ui->in.back) {
