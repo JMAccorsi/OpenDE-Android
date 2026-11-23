@@ -445,6 +445,10 @@ namespace dx {
             return false;
         }
         timeSeconds = 0;
+        frame = 0;
+        if (!restored) {
+            levelinfo::TimeSeconds(levelInfo) = 0;
+        }
         for (UObject* a : actors) {
             if (!a) {
                 continue;
@@ -461,6 +465,7 @@ namespace dx {
         if (restored) {
             savegame::levelRestored(*this);
         }
+        levelinfo::TimeSeconds(levelInfo) = timeSeconds;
         char host[256] = {};
 #ifdef _WIN32
         if (const char* name = std::getenv("COMPUTERNAME")) {

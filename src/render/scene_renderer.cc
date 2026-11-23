@@ -4133,6 +4133,8 @@ namespace dx {
         if (!preGathered) {
             gatherActorCandidates(actors, view, viewActor);
         }
+        World* world = World::current;
+        bool levelTicked = !world || world->level != levelData.level || world->frame > 0;
         for (UObject* actor : scratchIterated) {
             if (!actor || actor->destroyed) {
                 continue;
@@ -4167,7 +4169,7 @@ namespace dx {
                 if (!inFrustum(view, itemLoc, itemRadius) || !sphereReachesVisible(view, itemLoc, itemRadius, itemLeaf)) {
                     return;
                 }
-                if (levelData.levelInfo) {
+                if (levelData.levelInfo && levelTicked) {
                     actor::LastRenderTime(item) = levelinfo::TimeSeconds(levelData.levelInfo);
                 }
                 orderActor = item;
@@ -4208,7 +4210,22 @@ namespace dx {
                 decals.push_back(actor);
                 continue;
             }
-            if (levelData.levelInfo && !(occlude && occlusionUnconfirmed.count(actor))) {
+            bool allowRenderTime = levelData.levelInfo && levelTicked && !(occlude && occlusionUnconfirmed.count(actor));
+#ifdef __ANDROID__
+            if (allowRenderTime && world && world->level == levelData.level && actor->hasClassBit(CLS_Pawn) && actor != viewActor) {
+                Vector target = actor::Location(actor);
+                float halfH = actor::CollisionHeight(actor) * 0.75f;
+                bool visible = world->fastLineCheck(target, view.location);
+                if (!visible && halfH > 1.0f) {
+                    visible = world->fastLineCheck(Vector { target.x, target.y, target.z + halfH }, view.location)
+                        || world->fastLineCheck(Vector { target.x, target.y, target.z - halfH }, view.location);
+                }
+                if (!visible) {
+                    allowRenderTime = false;
+                }
+            }
+#endif
+            if (allowRenderTime) {
                 actor::LastRenderTime(actor) = levelinfo::TimeSeconds(levelData.levelInfo);
             }
             orderActor = actor;
