@@ -26,6 +26,7 @@ extern "C" {
 #include "ui/glyphs.h"
 #include "ui/kit.h"
 #include "ui/osk.h"
+#include "ui/pad3d.h"
 #include "ui/text.h"
 #include "ui/theme.h"
 #include "ui/thumbs.h"
@@ -63,7 +64,9 @@ namespace game {
             ConfirmDeleteShot,
             ConfirmDeleteMod,
             SteamMethod,
-            SteamCredentials
+            SteamCredentials,
+            PadPickAction,
+            PadTest
         };
 
         struct BridgeSnapshot {
@@ -147,6 +150,24 @@ namespace game {
             int settingsTab = 0;
             int settingsSelectedRow = 0;
             std::string settingsHelpText;
+
+            // 3D Controller preview, meters, button remapper & test modal
+            dxl_padmesh padMesh {};
+            int padMeshFamily = -1;
+            SDL_JoystickID padSelectedId = 0;
+            float padYaw = 0.0f;
+            float padPitch = 0.0f;
+            float padDragX = 0.0f;
+            float padDragY = 0.0f;
+            int padChosenPart = -1;
+            int padFindPart = -1;
+            dxl_rect padModelRect {};
+            std::string padPickKey;
+            std::string padPickLabel;
+            int padPickPart = -1;
+            SDL_JoystickID padTestId = 0;
+            double padTestHoldSince = -1.0;
+            bool padTestRumbling = false;
 
             DialogKind dialog = DialogKind::None;
             std::string dialogTitle;
@@ -1681,6 +1702,667 @@ namespace game {
             dx::config::user().set(sec, key, buf);
         }
 
+        // ---- 3D Controller Preview, Live Meters & Button Remapping ----
+
+        constexpr const char* kPadBindSec = "OpenDE.GamepadBindings";
+        constexpr const char* kPadSettingsSec = "DXController.ControllerSettings";
+
+        struct PadActionDef {
+            const char* command;
+            const char* labelEn;
+            const char* labelPt;
+        };
+
+        const PadActionDef kPadActions[] = {
+            { "", "(nothing)", "(nenhum)" },
+            { "Jump", "Jump", "Pular" },
+            { "ParseRightClick", "Use / Interact", "Usar / Interagir" },
+            { "ReloadWeapon", "Reload", "Recarregar" },
+            { "SwitchAmmo", "Change Ammo", "Trocar Munição" },
+            { "Fire", "Fire Weapon", "Atirar" },
+            { "Duck", "Crouch", "Agachar" },
+            { "Scope", "Toggle Scope", "Alternar Mira" },
+            { "Laser", "Toggle Laser", "Alternar Laser" },
+            { "LeanLeft", "Lean Left", "Inclinar Esq." },
+            { "LeanRight", "Lean Right", "Inclinar Dir." },
+            { "DropItem", "Drop Item", "Soltar Item" },
+            { "PutInHand", "Put Away Item", "Guardar Item" },
+            { "QuickSave", "Quick Save", "Salvar Rápido" },
+            { "QuickLoad", "Quick Load", "Carregar Rápido" },
+            { "TogglePlayerMenuWindow", "Inventory / Persona", "Inventário / Menu" },
+            { "ShowInventoryWindow", "Inventory Screen", "Tela Inventário" },
+            { "ShowAugmentationsWindow", "Augmentations Screen", "Tela Aprimoramentos" },
+            { "ShowSkillsWindow", "Skills Screen", "Tela Habilidades" },
+            { "ShowGoalsWindow", "Goals & Notes", "Objetivos e Notas" },
+            { "ShowMainMenu", "Main Menu", "Menu Principal" },
+            { "ActivateAllAugs", "Toggle All Augs", "Ativar Todos Augs" },
+            { "ActivateBelt 1", "Belt Slot 1", "Cinto Slot 1" },
+            { "ActivateBelt 2", "Belt Slot 2", "Cinto Slot 2" },
+            { "ActivateBelt 3", "Belt Slot 3", "Cinto Slot 3" },
+            { "ActivateBelt 4", "Belt Slot 4", "Cinto Slot 4" },
+            { "ActivateBelt 5", "Belt Slot 5", "Cinto Slot 5" },
+            { "ActivateBelt 6", "Belt Slot 6", "Cinto Slot 6" },
+            { "ActivateBelt 7", "Belt Slot 7", "Cinto Slot 7" },
+            { "ActivateBelt 8", "Belt Slot 8", "Cinto Slot 8" },
+            { "ActivateBelt 9", "Belt Slot 9", "Cinto Slot 9" },
+            { "ActivateBelt 0", "Belt Slot 0", "Cinto Slot 0" },
+            { "NextBeltItem", "Next Belt Item", "Próximo do Cinto" },
+            { "PrevBeltItem", "Prev Belt Item", "Anterior do Cinto" },
+            { "ToggleWalk", "Walk / Run Toggle", "Andar / Correr" },
+        };
+        constexpr int kPadActionCount = static_cast<int>(sizeof(kPadActions) / sizeof(kPadActions[0]));
+
+        struct PadButtonDef {
+            dxl_padpart part;
+            const char* joyKey;
+            const char* defaultCmd;
+        };
+
+        const PadButtonDef kPadButtons[] = {
+            { DXL_PADPART_SOUTH,   "Joy1",        "Jump" },
+            { DXL_PADPART_EAST,    "Joy2",        "ReloadWeapon" },
+            { DXL_PADPART_WEST,    "Joy3",        "ParseRightClick" },
+            { DXL_PADPART_NORTH,   "Joy4",        "SwitchAmmo" },
+            { DXL_PADPART_RSTICK,  "Joy10",       "" },
+            { DXL_PADPART_BACK,    "Joy7",        "TogglePlayerMenuWindow" },
+            { DXL_PADPART_START,   "Joy8",        "ShowMainMenu" },
+            { DXL_PADPART_DPUP,    "JoyPovUp",    "ActivateBelt 1" },
+            { DXL_PADPART_DPLEFT,  "JoyPovLeft",  "ActivateBelt 2" },
+            { DXL_PADPART_DPRIGHT, "JoyPovRight", "ActivateBelt 3" },
+            { DXL_PADPART_DPDOWN,  "JoyPovDown",  "ActivateBelt 4" },
+        };
+        constexpr int kPadButtonCount = static_cast<int>(sizeof(kPadButtons) / sizeof(kPadButtons[0]));
+
+        int findPadButtonByPart(int part)
+        {
+            for (int i = 0; i < kPadButtonCount; ++i) {
+                if (static_cast<int>(kPadButtons[i].part) == part) {
+                    return i;
+                }
+            }
+            return -1;
+        }
+
+        std::string getPadBindingCmd(const PadButtonDef& btn)
+        {
+            if (auto custom = dx::config::user().get(kPadBindSec, btn.joyKey)) {
+                return *custom;
+            }
+            return btn.defaultCmd;
+        }
+
+        const char* describePadCmd(const std::string& cmd)
+        {
+            for (int i = 0; i < kPadActionCount; ++i) {
+                if (iequalsStr(cmd, kPadActions[i].command)) {
+                    return isPtLanguage() ? kPadActions[i].labelPt : kPadActions[i].labelEn;
+                }
+            }
+            return cmd.empty() ? tr("(nothing)", "(nenhum)") : cmd.c_str();
+        }
+
+        const char* padPartLabel(dxl_pad_family fam, dxl_padpart part)
+        {
+            const bool ps = (fam == DXL_PADFAMILY_PLAYSTATION);
+            const bool nin = (fam == DXL_PADFAMILY_NINTENDO);
+            switch (part) {
+            case DXL_PADPART_SOUTH:     return ps ? "Cross" : (nin ? "B" : "A");
+            case DXL_PADPART_EAST:      return ps ? "Circle" : (nin ? "A" : "B");
+            case DXL_PADPART_WEST:      return ps ? "Square" : (nin ? "Y" : "X");
+            case DXL_PADPART_NORTH:     return ps ? "Triangle" : (nin ? "X" : "Y");
+            case DXL_PADPART_LSHOULDER: return ps ? "L1" : (nin ? "L" : "LB");
+            case DXL_PADPART_RSHOULDER: return ps ? "R1" : (nin ? "R" : "RB");
+            case DXL_PADPART_LTRIGGER:  return ps ? "L2" : (nin ? "ZL" : "LT");
+            case DXL_PADPART_RTRIGGER:  return ps ? "R2" : (nin ? "ZR" : "RT");
+            case DXL_PADPART_BACK:      return ps ? "Share" : (nin ? "-" : "Back");
+            case DXL_PADPART_START:     return ps ? "Options" : (nin ? "+" : "Start");
+            case DXL_PADPART_LSTICK:    return "L3";
+            case DXL_PADPART_RSTICK:    return "R3";
+            case DXL_PADPART_DPUP:      return tr("D-Pad Up", "D-Pad Cima");
+            case DXL_PADPART_DPDOWN:    return tr("D-Pad Down", "D-Pad Baixo");
+            case DXL_PADPART_DPLEFT:    return tr("D-Pad Left", "D-Pad Esq.");
+            case DXL_PADPART_DPRIGHT:   return tr("D-Pad Right", "D-Pad Dir.");
+            case DXL_PADPART_BODY:
+            case DXL_PADPART_GUIDE:
+            case DXL_PADPART_TRIM:
+            case DXL_PADPART_COUNT:
+            default:                    return "";
+            }
+        }
+
+        std::string padPartLeaderText(int part)
+        {
+            const int btnIdx = findPadButtonByPart(part);
+            if (part == DXL_PADPART_LSTICK) {
+                return tr("Moves; crouch", "Move; agacha");
+            }
+            if (part == DXL_PADPART_RSTICK) {
+                std::string cmd = btnIdx >= 0 ? getPadBindingCmd(kPadButtons[btnIdx]) : std::string();
+                if (cmd.empty()) {
+                    return tr("Looks; no click", "Mira; sem clique");
+                }
+                return std::string(tr("Looks; ", "Mira; ")) + describePadCmd(cmd);
+            }
+            if (part == DXL_PADPART_LSHOULDER) {
+                return tr("Weapon wheel", "Roda de armas");
+            }
+            if (part == DXL_PADPART_RSHOULDER) {
+                return tr("Aug wheel", "Roda de augs");
+            }
+            if (part == DXL_PADPART_LTRIGGER) {
+                return tr("Scope / laser", "Mira / laser");
+            }
+            if (part == DXL_PADPART_RTRIGGER) {
+                return tr("Fire", "Atirar");
+            }
+            if (btnIdx >= 0) {
+                std::string cmd = getPadBindingCmd(kPadButtons[btnIdx]);
+                return cmd.empty() ? "\xe2\x80\x94" : std::string(describePadCmd(cmd));
+            }
+            return "\xe2\x80\x94";
+        }
+
+        struct PadDeviceInfo {
+            SDL_JoystickID id = 0;
+            bool isGamepad = false;
+            std::string name;
+        };
+
+        std::vector<PadDeviceInfo> enumeratePads()
+        {
+            std::vector<PadDeviceInfo> out;
+            int count = 0;
+            SDL_JoystickID* ids = SDL_GetJoysticks(&count);
+            if (!ids) {
+                return out;
+            }
+            for (int i = 0; i < count; ++i) {
+                PadDeviceInfo info;
+                info.id = ids[i];
+                info.isGamepad = SDL_IsGamepad(ids[i]);
+                const char* nm = info.isGamepad ? SDL_GetGamepadNameForID(ids[i]) : SDL_GetJoystickNameForID(ids[i]);
+                info.name = (nm && *nm) ? nm : "Controller";
+                out.push_back(std::move(info));
+            }
+            SDL_free(ids);
+            return out;
+        }
+
+        void drawRing(dxl_ui* ui, float cx, float cy, float radius, float width, dxl_rgba color)
+        {
+            constexpr int kSeg = 36;
+            for (int i = 0; i < kSeg; ++i) {
+                float a0 = static_cast<float>(i) / static_cast<float>(kSeg) * 6.2831853f;
+                float a1 = static_cast<float>(i + 1) / static_cast<float>(kSeg) * 6.2831853f;
+                dxl_line(ui, cx + std::cos(a0) * radius, cy + std::sin(a0) * radius,
+                         cx + std::cos(a1) * radius, cy + std::sin(a1) * radius, width, color);
+            }
+        }
+
+        void drawStickMeter(dxl_ui* ui, float cx, float cy, float radius, float x, float y, float dz, const char* label)
+        {
+            const dxl_theme* t = &ui->theme;
+            dxl_disc(ui, cx, cy, radius, dxl_rgba_fade(t->panel_bottom, 0.9f));
+            drawRing(ui, cx, cy, radius, 1.0f, dxl_rgba_fade(t->accent, 0.55f));
+            if (dz > 0.01f) {
+                drawRing(ui, cx, cy, radius * dz, 1.0f, dxl_rgba_fade(t->help, 0.7f));
+            }
+            float mag = std::sqrt(x * x + y * y);
+            float gx = 0.0f;
+            float gy = 0.0f;
+            if (mag > dz && mag > 1e-4f) {
+                float norm = std::clamp((mag - dz) / std::max(1.0f - dz, 0.01f), 0.0f, 1.0f);
+                gx = (x / mag) * norm;
+                gy = (y / mag) * norm;
+            }
+            dxl_disc(ui, cx + x * radius, cy + y * radius, 3.0f, dxl_rgba_fade(t->text, 0.55f));
+            dxl_disc(ui, cx + gx * radius, cy + gy * radius, 4.0f, t->accent);
+            dxl_rect lr { cx - 58.0f, cy + radius + 2.0f, 116.0f, 16.0f };
+            dxl_label(ui, lr, DXL_FONT_SMALL, label, t->help, DXL_W_CENTER | DXL_W_MAY_CUT);
+        }
+
+        void drawTriggerMeter(dxl_ui* ui, dxl_rect r, float val, float threshold, const char* label)
+        {
+            const dxl_theme* t = &ui->theme;
+            dxl_rect bar { r.x, r.y, r.w, r.h - 18.0f };
+            dxl_fill(ui, bar, dxl_rgba_fade(t->panel_bottom, 0.9f));
+            float clamped = std::clamp(val, 0.0f, 1.0f);
+            bool active = clamped >= threshold;
+            dxl_rect fill { bar.x, bar.y + bar.h * (1.0f - clamped), bar.w, bar.h * clamped };
+            dxl_fill(ui, fill, active ? t->accent : dxl_rgba_fade(t->accent, 0.45f));
+            float markY = bar.y + bar.h * (1.0f - std::clamp(threshold, 0.05f, 0.95f));
+            dxl_line(ui, bar.x - 3.0f, markY, bar.x + bar.w + 3.0f, markY, 1.2f, t->text);
+            dxl_rect lr { r.x - 20.0f, bar.y + bar.h + 2.0f, r.w + 40.0f, 16.0f };
+            dxl_label(ui, lr, DXL_FONT_SMALL, label, t->help, DXL_W_CENTER | DXL_W_MAY_CUT);
+        }
+
+        void drawPad3DPanel(LauncherState& st, dxl_rect r, const std::vector<PadDeviceInfo>& pads, int shown,
+                            dxl_pad_family fam, int chosen, bool testing)
+        {
+            dxl_ui* ui = &st.ui;
+            const dxl_theme* t = &ui->theme;
+            dxl_well(ui, r);
+            dxl_rect in = dxl_inset(r, 10.0f);
+
+            const bool hasPad = shown >= 0 && shown < static_cast<int>(pads.size());
+            SDL_Gamepad* g = (hasPad && pads[static_cast<size_t>(shown)].isGamepad)
+                ? SDL_GetGamepadFromID(pads[static_cast<size_t>(shown)].id) : nullptr;
+
+            dxl_rect topRow = dxl_cut_top(&in, 26.0f);
+            const char* padTitle = hasPad ? pads[static_cast<size_t>(shown)].name.c_str()
+                                          : tr("No controller connected", "Nenhum controle conectado");
+            dxl_label(ui, topRow, DXL_FONT_LABEL, padTitle, hasPad ? t->text : t->help, DXL_W_LEFT | DXL_W_MAY_CUT);
+
+            const char* subLine = g
+                ? tr("SDL3 mapping  \xc2\xb7  DXController + custom bindings  \xc2\xb7  drag to rotate",
+                     "Mapeamento SDL3  \xc2\xb7  DXController + botões customizados  \xc2\xb7  arraste para girar")
+                : tr("Showing Xbox layout  \xc2\xb7  connect a controller to test live  \xc2\xb7  drag to rotate",
+                     "Exibindo layout Xbox  \xc2\xb7  conecte um controle para testar ao vivo  \xc2\xb7  arraste para girar");
+            dxl_label(ui, dxl_cut_top(&in, 18.0f), DXL_FONT_SMALL, subLine, t->help, DXL_W_LEFT | DXL_W_MAY_CUT);
+            dxl_cut_top(&in, 4.0f);
+
+            dxl_pad3d_state pstate {};
+            pstate.chosen = chosen;
+            if (g) {
+                for (int b = 0; b < SDL_GAMEPAD_BUTTON_COUNT && b + 1 < DXL_PADPART_LTRIGGER; ++b) {
+                    pstate.down[b + 1] = SDL_GetGamepadButton(g, static_cast<SDL_GamepadButton>(b)) ? 1 : 0;
+                }
+                pstate.lx = static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTX)) / 32767.0f;
+                pstate.ly = static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFTY)) / 32767.0f;
+                pstate.rx = static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTX)) / 32767.0f;
+                pstate.ry = static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHTY)) / 32767.0f;
+                pstate.lt = std::max(0.0f, static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)) / 32767.0f);
+                pstate.rt = std::max(0.0f, static_cast<float>(SDL_GetGamepadAxis(g, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / 32767.0f);
+            }
+
+            constexpr float kStripH = 78.0f;
+            dxl_rect strip = dxl_cut_bottom(&in, kStripH);
+
+            constexpr float kLeaderGap = 16.5f;
+            float labelW = std::clamp(in.w * 0.25f, 88.0f, 155.0f);
+            float needH = std::max(dxl_pad3d_fit_height(std::max(120.0f, in.w - 2.0f * labelW)), 8.0f * kLeaderGap + 16.0f) + 12.0f;
+            if (in.h > needH) {
+                float spare = in.h - needH;
+                in.y += spare * 0.5f;
+                in.h = needH;
+                strip.y -= spare * 0.5f;
+            }
+
+            float sway = ui->reduced_motion ? 0.0f : static_cast<float>(std::sin(ui->now * 0.6)) * 0.12f;
+            if (!ui->reduced_motion || g != nullptr) {
+                dxl_ui_animate(ui);
+            }
+
+            st.padModelRect = in;
+            uint32_t modelId = dxl_ui_id(ui, testing ? "pad test model" : "pad model");
+            int hits = dxl_ui_clickable(ui, modelId, in);
+            if (ui->held == modelId) {
+                st.padYaw += (ui->in.px - st.padDragX) * 0.01f;
+                st.padPitch += (ui->in.py - st.padDragY) * 0.01f;
+            }
+            st.padDragX = ui->in.px;
+            st.padDragY = ui->in.py;
+            if (g && !testing && !ui->capture_id && !ui->text_id && !ui->pads_off) {
+                if (std::fabs(pstate.rx) > 0.30f) {
+                    st.padYaw += pstate.rx * ui->dt * 1.4f;
+                }
+            }
+            st.padPitch = std::clamp(st.padPitch, -0.45f, 0.55f);
+            pstate.yaw = st.padYaw + sway;
+            pstate.pitch = 0.36f + st.padPitch;
+
+            dxl_rect modelR { in.x + labelW, in.y, std::max(80.0f, in.w - 2.0f * labelW), in.h };
+            if (st.padMeshFamily != static_cast<int>(fam)) {
+                dxl_padmesh_free(&st.padMesh);
+                dxl_padmesh_build(&st.padMesh, static_cast<int>(fam));
+                st.padMeshFamily = static_cast<int>(fam);
+            }
+            dxl_pad3d_spot spots[DXL_PADPART_COUNT] {};
+            dxl_pad3d_draw(ui, &st.padMesh, modelR, &pstate, spots);
+
+            float trigThresh = std::clamp(static_cast<float>(readSysInt(kPadSettingsSec, "TriggerThreshold", 64)) / 255.0f, 0.05f, 0.90f);
+            int pressed[DXL_PADPART_COUNT] {};
+            for (int p = 0; p < DXL_PADPART_COUNT; ++p) {
+                pressed[p] = pstate.down[p];
+            }
+            pressed[DXL_PADPART_LTRIGGER] = pstate.lt >= trigThresh ? 1 : 0;
+            pressed[DXL_PADPART_RTRIGGER] = pstate.rt >= trigThresh ? 1 : 0;
+            pressed[DXL_PADPART_LSTICK] = (pressed[DXL_PADPART_LSTICK] || std::fabs(pstate.lx) > 0.30f || std::fabs(pstate.ly) > 0.30f) ? 1 : 0;
+            pressed[DXL_PADPART_RSTICK] = (pressed[DXL_PADPART_RSTICK] || std::fabs(pstate.rx) > 0.30f || std::fabs(pstate.ry) > 0.30f) ? 1 : 0;
+
+            // Leader callout lines on left & right of 3D controller
+            struct LeaderItem {
+                int part = 0;
+                float y = 0.0f;
+                std::string text;
+            };
+            std::vector<LeaderItem> sides[2];
+            float midX = modelR.x + modelR.w * 0.5f;
+            for (int p = 0; p < DXL_PADPART_COUNT; ++p) {
+                if (!spots[p].seen || p == DXL_PADPART_GUIDE) {
+                    continue;
+                }
+                int sideIdx = spots[p].x > midX ? 1 : 0;
+                sides[sideIdx].push_back({ p, spots[p].y, padPartLeaderText(p) });
+            }
+            for (int sIdx = 0; sIdx < 2; ++sIdx) {
+                auto& items = sides[sIdx];
+                if (!items.empty() && static_cast<float>(items.size() - 1) * kLeaderGap + 16.0f > in.h) {
+                    std::vector<LeaderItem> kept;
+                    for (const auto& it : items) {
+                        if (it.part == chosen || pressed[it.part]) {
+                            kept.push_back(it);
+                        }
+                    }
+                    items = std::move(kept);
+                }
+                std::sort(items.begin(), items.end(), [](const LeaderItem& a, const LeaderItem& b) {
+                    return a.y < b.y;
+                });
+                for (size_t idx = 0; idx < items.size(); ++idx) {
+                    if (items[idx].y < in.y + 8.0f) {
+                        items[idx].y = in.y + 8.0f;
+                    }
+                    if (idx > 0 && items[idx].y < items[idx - 1].y + kLeaderGap) {
+                        items[idx].y = items[idx - 1].y + kLeaderGap;
+                    }
+                }
+                if (!items.empty() && items.back().y > in.y + in.h - 8.0f) {
+                    float shiftUp = items.back().y - (in.y + in.h - 8.0f);
+                    for (auto& it : items) {
+                        it.y -= shiftUp;
+                    }
+                }
+                for (const auto& it : items) {
+                    bool lit = (it.part == chosen) || (pressed[it.part] != 0);
+                    dxl_rgba col = lit ? t->text_focus : dxl_rgba_fade(t->help, 0.90f);
+                    float edgeX = sIdx ? (modelR.x + modelR.w) : modelR.x;
+                    dxl_line(ui, spots[it.part].x, spots[it.part].y, edgeX, it.y, lit ? 1.5f : 1.0f, dxl_rgba_fade(col, lit ? 0.95f : 0.65f));
+                    dxl_disc(ui, spots[it.part].x, spots[it.part].y, lit ? 3.2f : 2.3f, col);
+                    dxl_rect lr = sIdx
+                        ? dxl_rect{ edgeX + 4.0f, it.y - 8.0f, in.x + in.w - edgeX - 4.0f, 16.0f }
+                        : dxl_rect{ in.x, it.y - 8.0f, edgeX - in.x - 4.0f, 16.0f };
+                    dxl_label(ui, lr, DXL_FONT_SMALL, it.text.c_str(), col, (sIdx ? DXL_W_LEFT : DXL_W_RIGHT) | DXL_W_MAY_CUT);
+                }
+            }
+
+            // Clicking/tapping a button directly on the 3D controller selects its binding row
+            if (!testing && (hits & DXL_HIT_ACTIVATED)) {
+                int hitPart = dxl_pad3d_hit(&st.padMesh, spots, ui->in.px, ui->in.py);
+                if (hitPart >= 0) {
+                    if (findPadButtonByPart(hitPart) >= 0) {
+                        st.padFindPart = hitPart;
+                    } else if (hitPart != DXL_PADPART_BODY && hitPart != DXL_PADPART_TRIM && hitPart != DXL_PADPART_GUIDE) {
+                        showToast(st, std::string(padPartLabel(fam, static_cast<dxl_padpart>(hitPart))) + ": "
+                                      + padPartLeaderText(hitPart) + tr(" (DXController)", " (DXController)"));
+                    }
+                }
+            }
+
+            // Bottom live analog stick & trigger meters
+            float dzL = std::clamp(static_cast<float>(readSysInt(kPadSettingsSec, "StickDeadzoneLeft", 5200)) / 32767.0f, 0.0f, 0.45f);
+            float dzR = std::clamp(static_cast<float>(readSysInt(kPadSettingsSec, "StickDeadzoneRight", 5200)) / 32767.0f, 0.0f, 0.45f);
+            float stickR = std::max(16.0f, (strip.h - 22.0f) * 0.5f);
+            float stickCy = strip.y + stickR + 2.0f;
+            drawStickMeter(ui, strip.x + strip.w * 0.17f, stickCy, stickR, pstate.lx, pstate.ly, dzL, tr("Left stick", "Analógico esq."));
+            drawStickMeter(ui, strip.x + strip.w * 0.83f, stickCy, stickR, pstate.rx, pstate.ry, dzR, tr("Right stick", "Analógico dir."));
+            drawTriggerMeter(ui, dxl_rect{ strip.x + strip.w * 0.41f - 8.0f, strip.y + 2.0f, 16.0f, strip.h - 4.0f },
+                             pstate.lt, trigThresh, padPartLabel(fam, DXL_PADPART_LTRIGGER));
+            drawTriggerMeter(ui, dxl_rect{ strip.x + strip.w * 0.59f - 8.0f, strip.y + 2.0f, 16.0f, strip.h - 4.0f },
+                             pstate.rt, trigThresh, padPartLabel(fam, DXL_PADPART_RTRIGGER));
+        }
+
+        void drawControllerTab(LauncherState& st, dxl_rect area, dxl_rect& btnBar)
+        {
+            dxl_ui* ui = &st.ui;
+            const dxl_theme* t = &ui->theme;
+
+            std::vector<PadDeviceInfo> pads = enumeratePads();
+            int shown = -1;
+            for (int i = 0; i < static_cast<int>(pads.size()); ++i) {
+                if (pads[static_cast<size_t>(i)].id == st.padSelectedId) {
+                    shown = i;
+                    break;
+                }
+            }
+            if (shown < 0) {
+                for (int i = 0; i < static_cast<int>(pads.size()); ++i) {
+                    if (pads[static_cast<size_t>(i)].isGamepad) {
+                        shown = i;
+                        break;
+                    }
+                }
+            }
+            if (shown < 0 && !pads.empty()) {
+                shown = 0;
+            }
+            if (shown >= 0) {
+                st.padSelectedId = pads[static_cast<size_t>(shown)].id;
+            }
+
+            SDL_Gamepad* g = (shown >= 0 && pads[static_cast<size_t>(shown)].isGamepad)
+                ? SDL_GetGamepadFromID(pads[static_cast<size_t>(shown)].id) : nullptr;
+            dxl_pad_family fam = g ? dxl_ui_pad_family(g) : DXL_PADFAMILY_XBOX;
+
+            float leftW = std::floor(area.w * 0.54f);
+            dxl_rect leftR { area.x, area.y, leftW, area.h };
+            dxl_rect rightR { area.x + leftW + 12.0f, area.y, area.w - leftW - 12.0f, area.h };
+
+            // Rows: [0] Test controller, [1] Find button, [2..12] 11 buttons, [13..20] 8 tuning controls
+            constexpr int kFirstButtonRow = 2;
+            constexpr int kFirstTuneRow = kFirstButtonRow + kPadButtonCount;
+            constexpr int kTotalRows = kFirstTuneRow + 8;
+
+            dxl_well(ui, rightR);
+            dxl_list list {};
+            dxl_list_begin(ui, &list, "pad rows", dxl_inset(rightR, 4.0f), kTotalRows, 44.0f, DXL_LIST_WHOLE_ROWS);
+
+            if (st.padFindPart >= 0) {
+                int bIdx = findPadButtonByPart(st.padFindPart);
+                if (bIdx >= 0) {
+                    dxl_list_focus(ui, &list, kFirstButtonRow + bIdx);
+                }
+                st.padFindPart = -1;
+            }
+
+            int chosenPart = -1;
+            auto padRowHit = [&](int rowIdx, const char* helpText) -> dxl_rect {
+                dxl_rect rowR {};
+                if (dxl_list_rect(&list, rowIdx, &rowR)) {
+                    uint32_t rid = dxl_list_row_id(&list, rowIdx);
+                    if (ui->focus == rid || ui->hot == rid) {
+                        st.settingsSelectedRow = rowIdx;
+                        st.settingsHelpText = helpText;
+                    }
+                    return rowR;
+                }
+                return dxl_rect{ 0.0f, 0.0f, 0.0f, 0.0f };
+            };
+
+            // Row 0: Test controller modal
+            if (dxl_rect rowR = padRowHit(0, tr("Open full-size 3D controller tester with live button, stick and trigger rumble feedback.",
+                                                "Abre o testador 3D em tela cheia com resposta ao vivo dos botões, analógicos e vibração nos gatilhos.")); rowR.w > 0.0f) {
+                if (dxl_button_id(ui, dxl_list_row_id(&list, 0), dxl_inset(rowR, 3.0f), tr("Test the controller...", "Testar o controle..."), 0)) {
+                    if (g) {
+                        st.padTestId = pads[static_cast<size_t>(shown)].id;
+                        st.padTestHoldSince = -1.0;
+                        st.padTestRumbling = false;
+                        st.ui.pads_off = 1;
+                        st.dialog = DialogKind::PadTest;
+                        dxl_ui_forget(ui);
+                    } else {
+                        showToast(st, tr("No controller is connected.", "Nenhum controle conectado."));
+                    }
+                }
+            }
+
+            // Row 1: Find a button by pressing it
+            if (dxl_rect rowR = padRowHit(1, tr("Activate and press any button on your controller to jump straight to its binding.",
+                                                "Ative e pressione qualquer botão no controle para ir direto à configuração dele.")); rowR.w > 0.0f) {
+                uint32_t id = dxl_list_row_id(&list, 1);
+                bool capturing = (ui->capture_id == id);
+                if (capturing && ui->in.captured == DXL_CAPTURED_PAD) {
+                    int b = ui->in.captured_code;
+                    int part = (b >= 0 && b < SDL_GAMEPAD_BUTTON_MISC1) ? (b + 1) : -1;
+                    if (part >= 0 && findPadButtonByPart(part) >= 0) {
+                        st.padFindPart = part;
+                    } else if (part >= 0) {
+                        showToast(st, std::string(padPartLabel(fam, static_cast<dxl_padpart>(part))) + ": " + padPartLeaderText(part) + " (DXController)");
+                    }
+                    dxl_ui_capture_end(ui);
+                } else if (capturing && ui->in.captured == DXL_CAPTURED_TRIGGER) {
+                    int trigPart = ui->in.captured_code ? DXL_PADPART_RTRIGGER : DXL_PADPART_LTRIGGER;
+                    showToast(st, std::string(padPartLabel(fam, static_cast<dxl_padpart>(trigPart))) + ": " + padPartLeaderText(trigPart) + " (DXController)");
+                    dxl_ui_capture_end(ui);
+                } else if (capturing && (ui->in.captured || ui->in.back)) {
+                    dxl_ui_capture_end(ui);
+                    ui->in.back = 0;
+                }
+                int hits = dxl_ui_focusable(ui, id, rowR, 0);
+                if (hits & DXL_HIT_FOCUSED) {
+                    dxl_fill(ui, rowR, t->row_focus);
+                } else if (hits & DXL_HIT_HOVERED) {
+                    dxl_fill(ui, rowR, t->row_highlight);
+                }
+                const char* capText = capturing
+                    ? tr("Press a button on the controller...", "Pressione um botão no controle...")
+                    : tr("Find a button: press it", "Encontrar botão: pressione");
+                dxl_rgba capCol = capturing ? t->accent : ((hits & DXL_HIT_FOCUSED) ? t->text_focus : t->text);
+                dxl_label(ui, dxl_rect{ rowR.x + 14.0f, rowR.y, rowR.w - 28.0f, rowR.h }, DXL_FONT_BODY, capText, capCol, DXL_W_LEFT | DXL_W_MAY_CUT);
+                if ((hits & DXL_HIT_ACTIVATED) && !capturing) {
+                    dxl_ui_capture_begin(ui, id);
+                }
+            }
+
+            // Rows 2..12: Remappable gamepad buttons
+            for (int b = 0; b < kPadButtonCount; ++b) {
+                int rowIdx = kFirstButtonRow + b;
+                const PadButtonDef& def = kPadButtons[b];
+                dxl_rect rowR = padRowHit(rowIdx, tr("Press A / tap to change what this button does in gameplay (highlighted on the 3D controller).",
+                                                     "Pressione A / toque para trocar a ação deste botão no jogo (destacado no controle 3D)."));
+                if (rowR.w <= 0.0f) {
+                    continue;
+                }
+                uint32_t id = dxl_list_row_id(&list, rowIdx);
+                int hits = dxl_ui_focusable(ui, id, rowR, 0);
+                bool lit = (hits & DXL_HIT_FOCUSED) != 0;
+                if (lit) {
+                    chosenPart = static_cast<int>(def.part);
+                    dxl_fill(ui, rowR, t->row_focus);
+                } else if (hits & DXL_HIT_HOVERED) {
+                    chosenPart = static_cast<int>(def.part);
+                    dxl_fill(ui, rowR, t->row_highlight);
+                }
+                const char* btnLabel = padPartLabel(fam, def.part);
+                std::string curCmd = getPadBindingCmd(def);
+                const char* actionLabel = describePadCmd(curCmd);
+                float lw = std::min(150.0f, rowR.w * 0.42f);
+                dxl_label(ui, dxl_rect{ rowR.x + 14.0f, rowR.y, lw - 14.0f, rowR.h }, DXL_FONT_BODY, btnLabel, lit ? t->text_focus : t->text, DXL_W_LEFT | DXL_W_MAY_CUT);
+                dxl_label(ui, dxl_rect{ rowR.x + lw + 6.0f, rowR.y, rowR.w - lw - 20.0f, rowR.h }, DXL_FONT_BODY, actionLabel, lit ? t->text_focus : t->help, DXL_W_RIGHT | DXL_W_MAY_CUT);
+
+                if (hits & DXL_HIT_ACTIVATED) {
+                    st.padPickKey = def.joyKey;
+                    st.padPickLabel = btnLabel;
+                    st.padPickPart = static_cast<int>(def.part);
+                    st.dialog = DialogKind::PadPickAction;
+                    dxl_ui_forget(ui);
+                }
+            }
+
+            // Rows 13..20: Tuning controls ([DXController.ControllerSettings])
+            static const char* const curveNames[] = { "Linear", "Power", "Expo", "Sigmoid" };
+            auto curveIdxOf = [&](const char* key) {
+                std::string val = dx::config::system().get(kPadSettingsSec, key).value_or("Sigmoid");
+                for (int i = 0; i < 4; ++i) {
+                    if (iequalsStr(val, curveNames[i])) return i;
+                }
+                return 3;
+            };
+            double lookScale = std::clamp(readSysFloat(kPadSettingsSec, "StickScaleRight", 0.50), 0.10, 1.00);
+            double dzL = std::clamp(static_cast<double>(readSysInt(kPadSettingsSec, "StickDeadzoneLeft", 5200)) / 32767.0, 0.0, 0.45);
+            double dzR = std::clamp(static_cast<double>(readSysInt(kPadSettingsSec, "StickDeadzoneRight", 5200)) / 32767.0, 0.0, 0.45);
+            double trig = std::clamp(static_cast<double>(readSysInt(kPadSettingsSec, "TriggerThreshold", 64)) / 255.0, 0.05, 0.90);
+            double pwrR = std::clamp(readSysFloat(kPadSettingsSec, "StickCurvePowerRight", 2.0), 1.0, 4.0);
+            char scBuf[16], dlBuf[16], drBuf[16], trBuf[16], pwBuf[16];
+            std::snprintf(scBuf, sizeof(scBuf), "%.0f%%", lookScale * 100.0);
+            std::snprintf(dlBuf, sizeof(dlBuf), "%.0f%%", dzL * 100.0);
+            std::snprintf(drBuf, sizeof(drBuf), "%.0f%%", dzR * 100.0);
+            std::snprintf(trBuf, sizeof(trBuf), "%.0f%%", trig * 100.0);
+            std::snprintf(pwBuf, sizeof(pwBuf), "%.1f", pwrR);
+
+            auto tuneSlider = [&](int offset, const char* label, const char* help, double curVal, double minV, double maxV, double stepV, const char* shownVal, const auto& setter) {
+                dxl_rect rowR = padRowHit(kFirstTuneRow + offset, help);
+                if (rowR.w <= 0.0f) return;
+                double v = curVal;
+                if (dxl_slider(ui, dxl_list_row_id(&list, kFirstTuneRow + offset), rowR, label, &v, minV, maxV, stepV, shownVal, 0)) {
+                    setter(v);
+                }
+            };
+            auto tuneSpinner = [&](int offset, const char* label, const char* help, int curIdx, const char* const* choices, int countChoices, const auto& setter) {
+                dxl_rect rowR = padRowHit(kFirstTuneRow + offset, help);
+                if (rowR.w <= 0.0f) return;
+                int v = std::clamp(curIdx, 0, countChoices - 1);
+                int act = dxl_spinner(ui, dxl_list_row_id(&list, kFirstTuneRow + offset), rowR, label, &v, choices, countChoices, 0);
+                if (act == DXL_SPIN_CHANGED) {
+                    setter(v);
+                } else if (act == DXL_SPIN_LIST && countChoices > 1) {
+                    v = (v + 1) % countChoices;
+                    setter(v);
+                    ui->cues |= DXL_CUE_SLIDE;
+                }
+            };
+            auto tuneToggle = [&](int offset, const char* label, const char* help, bool cur, const auto& setter) {
+                dxl_rect rowR = padRowHit(kFirstTuneRow + offset, help);
+                if (rowR.w <= 0.0f) return;
+                int v = cur ? 1 : 0;
+                if (dxl_toggle(ui, dxl_list_row_id(&list, kFirstTuneRow + offset), rowR, label, &v, 0)) {
+                    setter(v != 0);
+                }
+            };
+
+            tuneSlider(0, tr("Right Stick Look Speed", "Sensib. Analógico Dir."), tr("Look sensitivity multiplier for right stick.", "Multiplicador de mira do analógico direito."), lookScale, 0.10, 1.00, 0.05, scBuf, [&](double v) {
+                writeSysFloat(kPadSettingsSec, "StickScaleRight", v);
+            });
+            tuneSlider(1, tr("Left Deadzone", "Zona Morta Esq."), tr("Inner deadzone for movement stick (shown on left meter).", "Zona morta do analógico esquerdo (visível no medidor)."), dzL, 0.0, 0.45, 0.02, dlBuf, [&](double v) {
+                writeSysInt(kPadSettingsSec, "StickDeadzoneLeft", static_cast<int>(std::lround(v * 32767.0)));
+            });
+            tuneSlider(2, tr("Right Deadzone", "Zona Morta Dir."), tr("Inner deadzone for look stick (shown on right meter).", "Zona morta do analógico direito (visível no medidor)."), dzR, 0.0, 0.45, 0.02, drBuf, [&](double v) {
+                writeSysInt(kPadSettingsSec, "StickDeadzoneRight", static_cast<int>(std::lround(v * 32767.0)));
+            });
+            tuneSpinner(3, tr("Left Stick Curve", "Curva Analógico Esq."), tr("Response curve for movement.", "Curva de resposta do analógico esquerdo."), curveIdxOf("StickCurveLeft"), curveNames, 4, [&](int idx) {
+                dx::config::system().set(kPadSettingsSec, "StickCurveLeft", curveNames[idx]);
+            });
+            tuneSpinner(4, tr("Right Stick Curve", "Curva Analógico Dir."), tr("Response curve for aiming.", "Curva de resposta da mira."), curveIdxOf("StickCurveRight"), curveNames, 4, [&](int idx) {
+                dx::config::system().set(kPadSettingsSec, "StickCurveRight", curveNames[idx]);
+            });
+            tuneSlider(5, tr("Right Curve Power", "Expoente Curva Dir."), tr("Power curve steepness.", "Intensidade da curva Power."), pwrR, 1.0, 4.0, 0.2, pwBuf, [&](double v) {
+                writeSysFloat(kPadSettingsSec, "StickCurvePowerRight", v, 1);
+            });
+            tuneSlider(6, tr("Trigger Threshold", "Limiar dos Gatilhos"), tr("How far LT/RT must be pulled (marked on trigger bars).", "Curso mínimo para acionar LT/RT (marcado nas barras)."), trig, 0.05, 0.90, 0.05, trBuf, [&](double v) {
+                writeSysInt(kPadSettingsSec, "TriggerThreshold", static_cast<int>(std::lround(v * 255.0)));
+            });
+            tuneToggle(7, tr("Invert Controller Y", "Inverter Y Controle"), tr("Inverts right stick vertical look.", "Inverte o eixo vertical do analógico direito."), readSysBool(kPadSettingsSec, "InvertLookY", false), [&](bool v) {
+                writeSysBool(kPadSettingsSec, "InvertLookY", v);
+            });
+
+            dxl_list_end(ui, &list);
+
+            if (chosenPart != st.padChosenPart) {
+                st.padChosenPart = chosenPart;
+                if (g && chosenPart >= 0) {
+                    SDL_RumbleGamepad(g, 0x2000, 0x4000, 70);
+                }
+            }
+
+            drawPad3DPanel(st, leftR, pads, shown, fam, chosenPart, false);
+
+            if (dxl_button(ui, "pad reset", dxl_cut_left(&btnBar, 240.0f), tr("Back to defaults", "Restaurar padrões"), 0)) {
+                dx::config::user().clearSection(kPadBindSec);
+                dx::config::user().save();
+                showToast(st, tr("Controller bindings reset to DXController defaults.", "Botões restaurados para o padrão do DXController."));
+            }
+        }
+
         void drawSettingsPage(LauncherState& st, dxl_rect r)
         {
             dxl_ui* ui = &st.ui;
@@ -1702,6 +2384,22 @@ namespace game {
             dxl_cut_bottom(&r, 8.0f);
             dxl_rect helpBox = dxl_cut_bottom(&r, 42.0f);
             dxl_cut_bottom(&r, 8.0f);
+
+            if (st.settingsTab == 4) {
+                drawControllerTab(st, r, btnBar);
+
+                // Help bar
+                dxl_panel(ui, helpBox);
+                if (!st.settingsHelpText.empty()) {
+                    dxl_label(ui, dxl_inset(helpBox, 10.0f), DXL_FONT_SMALL, st.settingsHelpText.c_str(), t->help, DXL_W_LEFT | DXL_W_MAY_CUT);
+                }
+
+                if (dxl_button(ui, "set done", dxl_cut_right(&btnBar, 160.0f), tr("Done", "Concluir"), DXL_W_PRIMARY) || ui->in.back) {
+                    ui->in.back = 0;
+                    goPage(st, Page::Home);
+                }
+                return;
+            }
 
             dxl_panel(ui, r);
             dxl_rect inside = dxl_inset(r, 10.0f);
@@ -1953,55 +2651,8 @@ namespace game {
                 });
                 break;
             }
-            case 4: { // Controller ([DXController.ControllerSettings])
-                constexpr const char* kPadSec = "DXController.ControllerSettings";
-                static const char* const curveNames[] = { "Linear", "Power", "Expo", "Sigmoid" };
-                auto curveIdxOf = [&](const char* key) {
-                    std::string val = dx::config::system().get(kPadSec, key).value_or("Sigmoid");
-                    for (int i = 0; i < 4; ++i) {
-                        if (iequalsStr(val, curveNames[i])) return i;
-                    }
-                    return 3;
-                };
-
-                double lookScale = std::clamp(readSysFloat(kPadSec, "StickScaleRight", 0.50), 0.10, 1.00);
-                double dzL = std::clamp(static_cast<double>(readSysInt(kPadSec, "StickDeadzoneLeft", 5200)) / 32767.0, 0.0, 0.50);
-                double dzR = std::clamp(static_cast<double>(readSysInt(kPadSec, "StickDeadzoneRight", 5200)) / 32767.0, 0.0, 0.50);
-                double trig = std::clamp(static_cast<double>(readSysInt(kPadSec, "TriggerThreshold", 64)) / 255.0, 0.05, 0.90);
-                double pwrR = std::clamp(readSysFloat(kPadSec, "StickCurvePowerRight", 2.0), 1.0, 4.0);
-                char scBuf[16], dlBuf[16], drBuf[16], trBuf[16], pwBuf[16];
-                std::snprintf(scBuf, sizeof(scBuf), "%.0f%%", lookScale * 100.0);
-                std::snprintf(dlBuf, sizeof(dlBuf), "%.0f%%", dzL * 100.0);
-                std::snprintf(drBuf, sizeof(drBuf), "%.0f%%", dzR * 100.0);
-                std::snprintf(trBuf, sizeof(trBuf), "%.0f%%", trig * 100.0);
-                std::snprintf(pwBuf, sizeof(pwBuf), "%.1f", pwrR);
-
-                doSlider(0, tr("Right Stick Look Speed", "Sensib. Analógico Direito"), tr("Look sensitivity multiplier for right stick.", "Multiplicador de mira do analógico direito."), lookScale, 0.10, 1.00, 0.05, scBuf, [&](double v) {
-                    writeSysFloat(kPadSec, "StickScaleRight", v);
-                });
-                doSlider(1, tr("Left Deadzone", "Zona Morta Esquerda"), tr("Inner deadzone for movement stick.", "Zona morta do analógico esquerdo."), dzL, 0.0, 0.45, 0.02, dlBuf, [&](double v) {
-                    writeSysInt(kPadSec, "StickDeadzoneLeft", static_cast<int>(std::lround(v * 32767.0)));
-                });
-                doSlider(2, tr("Right Deadzone", "Zona Morta Direita"), tr("Inner deadzone for camera look stick.", "Zona morta do analógico direito."), dzR, 0.0, 0.45, 0.02, drBuf, [&](double v) {
-                    writeSysInt(kPadSec, "StickDeadzoneRight", static_cast<int>(std::lround(v * 32767.0)));
-                });
-                doSpinner(3, tr("Left Stick Curve", "Curva Analógico Esq."), tr("Response curve for movement.", "Curva de resposta do analógico esquerdo."), curveIdxOf("StickCurveLeft"), curveNames, 4, [&](int idx) {
-                    dx::config::system().set(kPadSec, "StickCurveLeft", curveNames[idx]);
-                });
-                doSpinner(4, tr("Right Stick Curve", "Curva Analógico Dir."), tr("Response curve for aiming.", "Curva de resposta da mira."), curveIdxOf("StickCurveRight"), curveNames, 4, [&](int idx) {
-                    dx::config::system().set(kPadSec, "StickCurveRight", curveNames[idx]);
-                });
-                doSlider(5, tr("Right Curve Power", "Expoente Curva Dir."), tr("Power curve steepness.", "Intensidade da curva Power."), pwrR, 1.0, 4.0, 0.2, pwBuf, [&](double v) {
-                    writeSysFloat(kPadSec, "StickCurvePowerRight", v, 1);
-                });
-                doSlider(6, tr("Trigger Threshold", "Sensibilidade Gatilhos"), tr("How far LT/RT must be pressed.", "Curso mínimo para acionar LT/RT."), trig, 0.05, 0.90, 0.05, trBuf, [&](double v) {
-                    writeSysInt(kPadSec, "TriggerThreshold", static_cast<int>(std::lround(v * 255.0)));
-                });
-                doToggle(7, tr("Invert Controller Y", "Inverter Y Controle"), tr("Inverts right stick vertical look.", "Inverte o eixo vertical do analógico direito."), readSysBool(kPadSec, "InvertLookY", false), [&](bool v) {
-                    writeSysBool(kPadSec, "InvertLookY", v);
-                });
+            case 4: // Handled above by drawControllerTab
                 break;
-            }
             case 5: { // Gameplay & HUD
                 constexpr const char* kPlrSec = "DeusEx.DeusExPlayer";
                 static const char* const themeList[] = {
@@ -2493,6 +3144,151 @@ namespace game {
                 return;
             }
 
+            if (st.dialog == DialogKind::PadPickAction) {
+                std::string title = st.padPickLabel + " — " + tr("Choose action", "Escolher ação");
+                float dlgW = std::min(520.0f, above.w - 40.0f);
+                float dlgH = std::min(540.0f, above.h - 40.0f);
+                dxl_rect in = dxl_dialog_begin(ui, above, dlgW, dlgH, title.c_str());
+                dxl_rect btns = dxl_cut_bottom(&in, 42.0f);
+                dxl_cut_bottom(&in, 10.0f);
+
+                int btnIdx = findPadButtonByPart(st.padPickPart);
+                std::string curCmd = btnIdx >= 0 ? getPadBindingCmd(kPadButtons[btnIdx]) : std::string();
+
+                dxl_well(ui, in);
+                dxl_list plist {};
+                dxl_list_begin(ui, &plist, "pad action pick", dxl_inset(in, 4.0f), kPadActionCount, 40.0f, DXL_LIST_WHOLE_ROWS);
+                for (int i = 0; i < kPadActionCount; ++i) {
+                    dxl_rect rr {};
+                    if (!dxl_list_rect(&plist, i, &rr)) {
+                        continue;
+                    }
+                    uint32_t rid = dxl_list_row_id(&plist, i);
+                    int hits = dxl_ui_focusable(ui, rid, rr, 0);
+                    bool selected = iequalsStr(curCmd, kPadActions[i].command);
+                    bool lit = (hits & DXL_HIT_FOCUSED) != 0;
+                    if (lit) {
+                        dxl_fill(ui, rr, ui->theme.row_focus);
+                    } else if (hits & DXL_HIT_HOVERED) {
+                        dxl_fill(ui, rr, ui->theme.row_highlight);
+                    }
+                    const char* lbl = isPtLanguage() ? kPadActions[i].labelPt : kPadActions[i].labelEn;
+                    dxl_rgba col = lit ? ui->theme.text_focus : (selected ? ui->theme.accent : ui->theme.text);
+                    dxl_label(ui, dxl_rect{ rr.x + 14.0f, rr.y, rr.w - 100.0f, rr.h }, DXL_FONT_BODY, lbl, col, DXL_W_LEFT | DXL_W_MAY_CUT);
+                    if (selected) {
+                        dxl_label(ui, dxl_rect{ rr.x + rr.w - 92.0f, rr.y, 78.0f, rr.h }, DXL_FONT_SMALL, tr("Active", "Atual"), ui->theme.accent, DXL_W_RIGHT);
+                    }
+                    if (hits & DXL_HIT_ACTIVATED) {
+                        dx::config::user().set(kPadBindSec, st.padPickKey, kPadActions[i].command);
+                        dx::config::user().save();
+                        st.padFindPart = st.padPickPart;
+                        st.dialog = DialogKind::None;
+                        dxl_ui_forget(ui);
+                    }
+                }
+                dxl_list_end(ui, &plist);
+
+                bool cancel = dxl_button(ui, "pad pick cancel", dxl_cut_right(&btns, 160.0f), tr("Cancel", "Cancelar"), 0) != 0 || ui->in.back;
+                if (cancel) {
+                    ui->in.back = 0;
+                    st.padFindPart = st.padPickPart;
+                    st.dialog = DialogKind::None;
+                    dxl_ui_forget(ui);
+                }
+                dxl_dialog_end(ui);
+                dxl_ui_scope(ui, 0);
+                return;
+            }
+
+            if (st.dialog == DialogKind::PadTest) {
+                auto closeTest = [&]() {
+                    SDL_Gamepad* tg = SDL_GetGamepadFromID(st.padTestId);
+                    if (tg && st.padTestRumbling) {
+                        SDL_RumbleGamepad(tg, 0, 0, 0);
+                    }
+                    st.padTestRumbling = false;
+                    st.padTestHoldSince = -1.0;
+                    st.ui.pads_off = 0;
+                    st.dialog = DialogKind::None;
+                    dxl_ui_forget(ui);
+                };
+
+                SDL_Gamepad* tg = SDL_GetGamepadFromID(st.padTestId);
+                if (!tg) {
+                    closeTest();
+                    showToast(st, tr("Controller disconnected.", "Controle desconectado."));
+                    dxl_ui_scope(ui, 0);
+                    return;
+                }
+
+                dxl_pad_family tfam = dxl_ui_pad_family(tg);
+                SDL_GamepadButton backBtn = (tfam == DXL_PADFAMILY_NINTENDO) ? SDL_GAMEPAD_BUTTON_SOUTH : SDL_GAMEPAD_BUTTON_EAST;
+                float hold = 0.0f;
+                if (SDL_GetGamepadButton(tg, backBtn)) {
+                    if (st.padTestHoldSince < 0.0) {
+                        st.padTestHoldSince = ui->now;
+                    }
+                    hold = static_cast<float>(ui->now - st.padTestHoldSince);
+                } else {
+                    st.padTestHoldSince = -1.0;
+                }
+                if (hold >= 1.0f) {
+                    closeTest();
+                    dxl_ui_scope(ui, 0);
+                    return;
+                }
+
+                float lt = std::max(0.0f, static_cast<float>(SDL_GetGamepadAxis(tg, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)) / 32767.0f);
+                float rt = std::max(0.0f, static_cast<float>(SDL_GetGamepadAxis(tg, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / 32767.0f);
+                if (lt > 0.05f || rt > 0.05f) {
+                    SDL_RumbleGamepad(tg,
+                        static_cast<Uint16>(std::min(lt, 1.0f) * 65535.0f),
+                        static_cast<Uint16>(std::min(rt, 1.0f) * 65535.0f), 250);
+                    st.padTestRumbling = true;
+                } else if (st.padTestRumbling) {
+                    SDL_RumbleGamepad(tg, 0, 0, 0);
+                    st.padTestRumbling = false;
+                }
+                dxl_ui_animate(ui);
+
+                std::vector<PadDeviceInfo> pads = enumeratePads();
+                int shown = 0;
+                for (int i = 0; i < static_cast<int>(pads.size()); ++i) {
+                    if (pads[static_cast<size_t>(i)].id == st.padTestId) {
+                        shown = i;
+                        break;
+                    }
+                }
+
+                float dlgW = std::min(960.0f, above.w - 36.0f);
+                float dlgH = std::min(640.0f, above.h - 28.0f);
+                dxl_rect in = dxl_dialog_begin(ui, above, dlgW, dlgH, tr("Testing the controller", "Testando o controle"));
+                const char* backName = padPartLabel(tfam, backBtn == SDL_GAMEPAD_BUTTON_SOUTH ? DXL_PADPART_SOUTH : DXL_PADPART_EAST);
+                std::string hintLine = isPtLanguage()
+                    ? (std::string("Todos os botões, analógicos e gatilhos acendem no modelo 3D; os gatilhos testam a vibração. Segure ") + backName + " por 1s ou toque em Parar.")
+                    : (std::string("Every button, stick and trigger lights up on the 3D model; triggers test rumble. Hold ") + backName + " for 1s or tap Stop to finish.");
+                float ph = dxl_paragraph(ui, in, DXL_FONT_SMALL, hintLine.c_str(), ui->theme.help);
+                dxl_cut_top(&in, ph + 6.0f);
+                dxl_rect holdBar = dxl_cut_top(&in, 4.0f);
+                if (hold > 0.0f) {
+                    dxl_fill(ui, holdBar, dxl_rgba_fade(ui->theme.panel_light, 0.25f));
+                    dxl_fill(ui, dxl_rect{ holdBar.x, holdBar.y, holdBar.w * std::min(hold, 1.0f), holdBar.h }, ui->theme.accent);
+                }
+                dxl_cut_top(&in, 8.0f);
+                dxl_rect btns = dxl_cut_bottom(&in, 44.0f);
+                dxl_cut_bottom(&in, 8.0f);
+
+                drawPad3DPanel(st, in, pads, shown, tfam, -1, true);
+                bool stop = dxl_button(ui, "pad test stop", dxl_cut_right(&btns, 180.0f), tr("Stop testing", "Parar teste"), DXL_W_PRIMARY) != 0;
+                dxl_dialog_end(ui);
+                if (stop || ui->in.back) {
+                    ui->in.back = 0;
+                    closeTest();
+                }
+                dxl_ui_scope(ui, 0);
+                return;
+            }
+
             dxl_rect in = dxl_dialog_begin(ui, above, 460.0f, 180.0f, st.dialogTitle.c_str());
             dxl_rect btns = dxl_cut_bottom(&in, 42.0f);
             dxl_cut_bottom(&in, 10.0f);
@@ -2593,6 +3389,7 @@ namespace game {
             dxl_shots_free(&st.shotList);
             dxl_thumbs_free(st.shotThumbs);
             dxl_thumbs_free(st.shotWhole);
+            dxl_padmesh_free(&st.padMesh);
             dxl_art_free(&st.art);
             dxl_ui_free(&st.ui);
             if (st.renderer) {
@@ -2724,9 +3521,15 @@ namespace game {
                         st.touchLastY = ev.tfinger.y;
                     }
                 } else if (ev.type == SDL_EVENT_FINGER_MOTION && st.touchTracking && ev.tfinger.fingerID == st.touchFinger) {
+                    bool onPad3D = (st.page == Page::Settings && st.settingsTab == 4) || st.dialog == DialogKind::PadTest;
+                    float startDpX = st.touchStartX * st.ui.w;
+                    float startDpY = st.touchStartY * st.ui.h;
+                    bool startedOnModel = onPad3D
+                        && startDpX >= st.padModelRect.x && startDpX <= st.padModelRect.x + st.padModelRect.w
+                        && startDpY >= st.padModelRect.y && startDpY <= st.padModelRect.y + st.padModelRect.h;
                     float totalDyPx = std::fabs(ev.tfinger.y - st.touchStartY) * static_cast<float>(st.ui.h_px);
                     float totalDxPx = std::fabs(ev.tfinger.x - st.touchStartX) * static_cast<float>(st.ui.w_px);
-                    if (!st.touchSwiping && totalDyPx > 20.0f && totalDyPx > totalDxPx * 1.2f) {
+                    if (!startedOnModel && !st.touchSwiping && totalDyPx > 20.0f && totalDyPx > totalDxPx * 1.2f) {
                         st.touchSwiping = true;
                     }
                     if (st.touchSwiping) {

@@ -18,6 +18,7 @@ namespace dx {
         std::optional<std::string> get(std::string_view section, std::string_view key) const;
         std::vector<std::string> getAll(std::string_view section, std::string_view key) const;
         void set(std::string_view section, std::string_view key, std::string_view value);
+        void clearSection(std::string_view section);
         std::vector<std::pair<std::string, std::string>> section(std::string_view section) const;
 
         std::filesystem::path path;

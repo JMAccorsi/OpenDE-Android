@@ -486,6 +486,13 @@ namespace dx {
         section->entries.emplace_back(std::string(key), std::string(value));
     }
 
+    void Ini::clearSection(std::string_view sectionName)
+    {
+        sections.erase(std::remove_if(sections.begin(), sections.end(), [&](const Section& existing) {
+            return iequals(existing.name, sectionName);
+        }), sections.end());
+    }
+
     std::vector<std::pair<std::string, std::string>> Ini::section(std::string_view sectionName) const
     {
         const Section* found = find(sectionName);

@@ -801,6 +801,12 @@ namespace dx {
                     state.bindings[entry.code] = entry.command;
                 }
             }
+            for (const auto& [entryKey, value] : config::user().section("OpenDE.GamepadBindings")) {
+                uint8_t code = keyFromName(entryKey);
+                if (code) {
+                    state.bindings[code] = value;
+                }
+            }
             state.loaded = true;
             reloadGamepadSettings();
         }
