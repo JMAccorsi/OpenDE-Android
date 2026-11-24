@@ -1196,7 +1196,7 @@ namespace game {
             const dxl_theme* t = &ui->theme;
             const dxl_save* latest = st.gameValid ? latestSave(st) : nullptr;
 
-            float menuW = std::clamp(r.w * 0.30f, 230.0f, 320.0f);
+            float menuW = std::clamp(r.w * 0.27f, 240.0f, 360.0f);
             dxl_rect menu { r.x, r.y + 4.0f, menuW, r.h - 4.0f };
 
             const int btnCount = st.gameValid ? ((latest ? 1 : 0) + 8) : 3;
@@ -1252,8 +1252,8 @@ namespace game {
             }
 
             // Profile summary card on right
-            float px = r.x + menuW + 34.0f;
-            float pw = std::min(640.0f, r.x + r.w - px);
+            float px = r.x + menuW + 32.0f;
+            float pw = r.x + r.w - px;
             if (pw > 180.0f) {
                 const std::string& profileName = (st.gameValid && st.modSel >= 0 && static_cast<size_t>(st.modSel) < st.mods.size())
                     ? st.mods[static_cast<size_t>(st.modSel)].name
@@ -1296,8 +1296,26 @@ namespace game {
 
                         float room = r.y + r.h - (panel.y + panel.h + 14.0f);
                         if (room >= 96.0f) {
-                            float sh = std::min(room, 210.0f);
-                            drawSaveSnapshot(st, latest, dxl_rect{ px, panel.y + panel.h + 14.0f, sh * 4.0f / 3.0f, sh });
+                            float sh = std::min(room, 224.0f);
+                            dxl_rect saveCard { px, panel.y + panel.h + 14.0f, pw, sh };
+                            dxl_panel(ui, saveCard);
+                            dxl_rect scIn = dxl_inset(saveCard, 12.0f);
+                            float snapH = scIn.h;
+                            float snapW = std::min(snapH * 4.0f / 3.0f, scIn.w * 0.45f);
+                            dxl_rect snapR = dxl_cut_left(&scIn, snapW);
+                            drawSaveSnapshot(st, latest, snapR);
+                            if (scIn.w > 180.0f) {
+                                dxl_cut_left(&scIn, 18.0f);
+                                dxl_label(ui, dxl_cut_top(&scIn, 20.0f), DXL_FONT_LABEL, tr("CONTINUE FROM LATEST SAVE", "CONTINUAR DO ÚLTIMO SAVE"), t->accent, DXL_W_LEFT | DXL_W_MAY_CUT);
+                                dxl_cut_top(&scIn, 4.0f);
+                                dxl_label(ui, dxl_cut_top(&scIn, 28.0f), DXL_FONT_HEADING, latest->info.description[0] ? latest->info.description : latest->folder, t->title_text, DXL_W_LEFT | DXL_W_MAY_CUT);
+                                if (latest->info.location[0]) {
+                                    dxl_label(ui, dxl_cut_top(&scIn, 24.0f), DXL_FONT_BODY, latest->info.location, t->text_focus, DXL_W_LEFT | DXL_W_MAY_CUT);
+                                }
+                                if (when[0]) {
+                                    dxl_label(ui, dxl_cut_top(&scIn, 22.0f), DXL_FONT_SMALL, when, t->help, DXL_W_LEFT | DXL_W_MAY_CUT);
+                                }
+                            }
                         }
                     }
                 } else {
@@ -1338,7 +1356,7 @@ namespace game {
         {
             dxl_ui* ui = &st.ui;
             const dxl_theme* t = &ui->theme;
-            const float sideW = std::min(340.0f, r.w * 0.36f);
+            const float sideW = std::clamp(r.w * 0.34f, 280.0f, 440.0f);
             dxl_rect listPanel { r.x, r.y, r.w - sideW - 18.0f, r.h };
             dxl_rect side { listPanel.x + listPanel.w + 18.0f, r.y, sideW, r.h };
 
@@ -1423,7 +1441,7 @@ namespace game {
         {
             dxl_ui* ui = &st.ui;
             const dxl_theme* t = &ui->theme;
-            const float sideW = std::min(320.0f, r.w * 0.36f);
+            const float sideW = std::clamp(r.w * 0.33f, 280.0f, 420.0f);
             dxl_rect listPanel { r.x, r.y, r.w - sideW - 18.0f, r.h };
             dxl_rect side { listPanel.x + listPanel.w + 18.0f, r.y, sideW, r.h };
 
@@ -1565,7 +1583,7 @@ namespace game {
                 return;
             }
 
-            const float sideW = std::min(280.0f, r.w * 0.30f);
+            const float sideW = std::clamp(r.w * 0.28f, 250.0f, 360.0f);
             dxl_rect gridPanel { r.x, r.y, r.w - sideW - 18.0f, r.h };
             dxl_rect side { gridPanel.x + gridPanel.w + 18.0f, r.y, sideW, r.h };
 
@@ -1979,7 +1997,7 @@ namespace game {
             dxl_rect strip = dxl_cut_bottom(&in, kStripH);
 
             constexpr float kLeaderGap = 16.5f;
-            float labelW = std::clamp(in.w * 0.25f, 88.0f, 155.0f);
+            float labelW = std::clamp(in.w * 0.25f, 88.0f, 180.0f);
             float needH = std::max(dxl_pad3d_fit_height(std::max(120.0f, in.w - 2.0f * labelW)), 8.0f * kLeaderGap + 16.0f) + 12.0f;
             if (in.h > needH) {
                 float spare = in.h - needH;
@@ -3570,8 +3588,8 @@ namespace game {
             const bool modalActive = (st.dialog != DialogKind::None) || st.bridge.busy || st.bridge.guard || !st.bridge.error.empty() || st.oskOpen;
 
             constexpr float kFootH = 52.0f;
-            float margin = std::max(28.0f, (st.ui.w - 1360.0f) * 0.5f);
-            margin = std::clamp(margin, 28.0f, 120.0f);
+            float margin = std::max(28.0f, (st.ui.w - 1680.0f) * 0.5f);
+            margin = std::clamp(margin, 28.0f, 160.0f);
             dxl_rect above { 0.0f, 0.0f, st.ui.w, st.ui.h - kFootH };
             dxl_rect bottom { 0.0f, st.ui.h - kFootH, st.ui.w, kFootH };
 

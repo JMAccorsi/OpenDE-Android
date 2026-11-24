@@ -232,8 +232,8 @@ namespace dx::extension {
 
     float extendedVirtualWidth()
     {
-        float realWidth = std::ceil(state().viewportWidth / virtualScale());
-        return std::max(std::min(realWidth, std::ceil(std::ceil(fittedHeight() / virtualScale()) * 16.0f / 9.0f)), virtualWidth());
+        float realWidth = std::floor(state().viewportWidth / virtualScale());
+        return std::max(realWidth, virtualWidth());
     }
 
     bool spansSafeArea(UWindow* window, float absoluteX)
