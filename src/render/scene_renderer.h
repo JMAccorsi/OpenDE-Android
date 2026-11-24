@@ -44,6 +44,14 @@ namespace dx {
         float actCandMs = 0;
         float actEmitMs = 0;
         float actFlushMs = 0;
+        float actWaitMs = 0;
+        float actTransMs = 0;
+        float transSurfMs = 0;
+        float transUpMs = 0;
+        float transDrawMs = 0;
+        int transSurfaces = 0;
+        int transSurfCalls = 0;
+        int transDraws = 0;
         float coronasMs = 0;
         float ssaoMs = 0;
         float fxaaMs = 0;
@@ -109,6 +117,7 @@ namespace dx {
             std::vector<std::array<int32_t, 6>> surfPolys;
             std::vector<std::array<int32_t, 3>> nodePolys;
             bool fogZone = false;
+            bool reversed = false;
             int32_t first = 0;
             int32_t count = 0;
             Vector boundsMin;
@@ -151,9 +160,26 @@ namespace dx {
             int32_t count = 0;
         };
 
+        struct OccNode {
+            Plane plane;
+            uint64_t zoneMask = 0;
+            uint64_t emitZoneMask = 0;
+            int32_t front = -1;
+            int32_t back = -1;
+            int32_t iPlane = -1;
+            int32_t leaf[2] = { -1, -1 };
+            int32_t renderBound = -1;
+            uint32_t flags = 0;
+            int32_t polyStart = 0;
+            uint16_t polyCount = 0;
+            int16_t mirror = -1;
+        };
+
         struct LevelData {
             ULevel* level = nullptr;
             UModel* model = nullptr;
+            std::vector<OccNode> occNodes;
+            std::vector<Vector> occPoints;
             uint32_t vao = 0;
             uint32_t detailVao = 0;
             std::vector<Vector> detailPoints;
@@ -175,6 +201,7 @@ namespace dx {
             std::vector<NodeEmit> nodeEmits;
             std::vector<uint64_t> nodeEmitZoneMask;
             std::vector<uint32_t> nodeStamp;
+            std::vector<uint32_t> transNodeStamp;
             std::vector<uint32_t> surfStamp;
             std::vector<uint32_t> leafStamp;
             std::vector<uint32_t> cullStamp;
@@ -352,10 +379,10 @@ namespace dx {
         void buildLevel(ULevel* level, const std::vector<UObject*>& actors);
         void drawLevelGeometry(const View& view, bool translucentPass, const std::function<void()>& afterGather = nullptr);
         void drawDetail(const Batch& batch, const View& view, int32_t onlyNode);
-        void drawBatch(const Batch& batch, const View& view, const int32_t* firsts, const int32_t* counts, int32_t ranges, int32_t onlyNode, uint32_t& uploadedLights);
+        void drawBatch(const Batch& batch, const View& view, const int32_t* firsts, const int32_t* counts, int32_t ranges, int32_t onlyNode, uint32_t& uploadedLights, size_t prebakedByteOffset = 0, int32_t prebakedCount = 0);
         void occludeView(View& view, const std::vector<ScreenSpan>* open);
         void gatherVisible(const View& view);
-        void drawMirrors(const View& view, const std::vector<UObject*>& actors);
+        bool drawMirrors(const View& view, const std::vector<UObject*>& actors);
         void drawFrameContent(const View& view, const std::vector<UObject*>& actors, UObject* viewActor, bool occlude);
         void applyClip(const View& view);
         void drawSky(const View& frame, const std::vector<UObject*>& actors, UObject* viewActor);
@@ -512,6 +539,16 @@ namespace dx {
         std::vector<int32_t> scratchNodes;
         std::vector<int32_t> scratchFirsts;
         std::vector<int32_t> scratchCounts;
+        struct PreparedBatch {
+            int32_t batchIndex = 0;
+            int32_t rangeStart = 0;
+            int32_t rangeCount = 0;
+            size_t indexByteOffset = 0;
+            int32_t indexCount = 0;
+        };
+        std::vector<PreparedBatch> scratchPreparedBatches;
+        std::vector<int32_t> scratchAllFirsts;
+        std::vector<int32_t> scratchAllCounts;
         std::vector<ScreenSpan> scratchSpans;
         std::vector<std::shared_ptr<ViewVisibility>> visibilityPool;
         std::vector<ScreenPoint> scratchPendingPoints;
@@ -520,6 +557,8 @@ namespace dx {
             int32_t index = 0;
             int32_t stage = 0;
             uint32_t planeMask = 0;
+            int32_t farChild = 0;
+            int32_t farLeaf = -1;
         };
         std::vector<OccStackEntry> scratchOccStack;
         std::vector<EmittedGroup> scratchOldGroups;
@@ -527,6 +566,7 @@ namespace dx {
         std::vector<GLVertex> scratchDecalVertices;
         std::vector<Vector> scratchDecalPolygon;
         uint32_t visibleStamp = 0;
+        uint32_t transStamp = 0;
         int viewportWidth = 1;
         int viewportHeight = 1;
         std::vector<OcclusionState*> occlusionIssued;

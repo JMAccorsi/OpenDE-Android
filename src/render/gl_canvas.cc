@@ -58,7 +58,7 @@ namespace dx {
         shader.setTint(1, 1, 1, 1);
         shader.setClipPlanes(nullptr, 0);
         glDisable(GL_DEPTH_TEST);
-        glDisable(GL_CULL_FACE);
+        shader.setCulling(false);
 
         const uint32_t whiteTex = textures.white();
         bool scissorKnown = false;
@@ -202,36 +202,62 @@ namespace dx {
         float v0 = v / texHeight;
         float u1 = (u + ul) / texWidth;
         float v1 = (v + vl) / texHeight;
-        GLVertex corners[4];
-        float xs[4] = { x, x + w, x + w, x };
-        float ys[4] = { y, y, y + h, y + h };
-        float us[4] = { u0, u1, u1, u0 };
-        float vs[4] = { v0, v0, v1, v1 };
-        for (int i = 0; i < 4; i++) {
-            corners[i].x = xs[i];
-            corners[i].y = ys[i];
-            corners[i].u = us[i];
-            corners[i].v = vs[i];
-            corners[i].r = color.r;
-            corners[i].g = color.g;
-            corners[i].b = color.b;
-            corners[i].a = color.a;
-        }
-        const size_t base = vertices.size();
-        vertices.resize(base + 6);
-        GLVertex* out = vertices.data() + base;
-        out[0] = corners[0];
-        out[1] = corners[1];
-        out[2] = corners[2];
-        out[3] = corners[0];
-        out[4] = corners[2];
-        out[5] = corners[3];
+        GLVertex v00;
+        v00.x = x;
+        v00.y = y;
+        v00.u = u0;
+        v00.v = v0;
+        v00.setColor(color.r, color.g, color.b, color.a);
+        GLVertex v10 = v00;
+        v10.x = x + w;
+        v10.u = u1;
+        GLVertex v11 = v10;
+        v11.y = y + h;
+        v11.v = v1;
+        GLVertex v01 = v00;
+        v01.y = y + h;
+        v01.v = v1;
+        vertices.push_back(v00);
+        vertices.push_back(v10);
+        vertices.push_back(v11);
+        vertices.push_back(v00);
+        vertices.push_back(v11);
+        vertices.push_back(v01);
         batches.back().count += 6;
     }
 
     void GLCanvas::drawRect(float x, float y, float w, float h, LinearColor color, BlendStyle style)
     {
-        drawTile(nullptr, x, y, w, h, 0, 0, 1, 1, color, style == BlendStyle::Masked ? BlendStyle::Normal : style, false);
+        if (style == BlendStyle::None) {
+            return;
+        }
+        BlendStyle resolved = style == BlendStyle::Masked ? BlendStyle::Normal : style;
+        prepare(textures.white(), resolved, false, false, GL_TRIANGLES);
+        if (resolved == BlendStyle::Modulated) {
+            color = { 1, 1, 1, 1 };
+        }
+        GLVertex v00;
+        v00.x = x;
+        v00.y = y;
+        v00.u = 0.0f;
+        v00.v = 0.0f;
+        v00.setColor(color.r, color.g, color.b, color.a);
+        GLVertex v10 = v00;
+        v10.x = x + w;
+        v10.u = 1.0f;
+        GLVertex v11 = v10;
+        v11.y = y + h;
+        v11.v = 1.0f;
+        GLVertex v01 = v00;
+        v01.y = y + h;
+        v01.v = 1.0f;
+        vertices.push_back(v00);
+        vertices.push_back(v10);
+        vertices.push_back(v11);
+        vertices.push_back(v00);
+        vertices.push_back(v11);
+        vertices.push_back(v01);
+        batches.back().count += 6;
     }
 
     void GLCanvas::drawLine(float x1, float y1, float x2, float y2, LinearColor color)
@@ -240,10 +266,7 @@ namespace dx {
         GLVertex a;
         a.x = x1 + 0.5f;
         a.y = y1 + 0.5f;
-        a.r = color.r;
-        a.g = color.g;
-        a.b = color.b;
-        a.a = color.a;
+        a.setColor(color.r, color.g, color.b, color.a);
         GLVertex b = a;
         b.x = x2 + 0.5f;
         b.y = y2 + 0.5f;

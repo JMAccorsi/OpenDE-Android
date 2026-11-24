@@ -509,10 +509,21 @@ namespace dx {
             }
             float maxFrameRate = texture::MaxFrameRate(texture);
             float minFrameRate = texture::MinFrameRate(texture);
+#ifdef __ANDROID__
+            if (constantRate > 0.0f) {
+                if (maxFrameRate == 0.0f || maxFrameRate > constantRate) {
+                    maxFrameRate = constantRate;
+                }
+                if (minFrameRate == 0.0f || minFrameRate > maxFrameRate) {
+                    minFrameRate = maxFrameRate;
+                }
+            }
+#else
             if (maxFrameRate == 0.0f && constantRate > 0.0f) {
                 maxFrameRate = constantRate;
                 minFrameRate = constantRate;
             }
+#endif
             if (maxFrameRate == 0.0f) {
                 constantTimeTick();
                 return true;
@@ -1332,41 +1343,52 @@ namespace dx {
 
         void calculateWater()
         {
-            int32_t xdim = usize / 2;
-            int32_t ydim = vsize / 2;
-            int32_t lines = ydim * 2;
+            const int32_t xdim = usize >> 1;
+            const int32_t ydim = vsize >> 1;
+            const int32_t lines = ydim << 1;
+            const int32_t xMask = xdim - 1;
+            const int32_t lineMask = lines - 1;
             waveParity++;
-            auto cell = [&](int32_t line, int32_t x) -> uint8_t& {
-                return fields[static_cast<size_t>(((line + lines) % lines) * xdim + (x + xdim) % xdim)];
-            };
             const uint8_t* wave = fractal.wave + 512;
             const uint8_t* table = renderTable + 512;
-            bool even = (waveParity & 1) == 0;
+            uint8_t* fieldData = fields.data();
+            uint8_t* pixelData = pixels.data();
+            const bool even = (waveParity & 1) == 0;
+            const int32_t base = even ? -3 : -2;
             for (int32_t y = 0; y < ydim; y++) {
-                int32_t line = even ? y * 2 : y * 2 + 1;
-                int32_t base = even ? -3 : -2;
+                const int32_t line = even ? (y << 1) : ((y << 1) + 1);
+                const uint8_t* prevLine = fieldData + static_cast<size_t>(((line - 1) & lineMask) * xdim);
+                const uint8_t* nextLine = fieldData + static_cast<size_t>(((line + 1) & lineMask) * xdim);
+                uint8_t* curLine = fieldData + static_cast<size_t>((line & lineMask) * xdim);
+                const int32_t row = even ? ((y << 1) - 1) : (y << 1);
+                uint8_t* pixRow0 = pixelData + static_cast<size_t>((row & vmask) * usize);
+                uint8_t* pixRow1 = pixelData + static_cast<size_t>(((row + 1) & vmask) * usize);
                 for (int32_t x = 0; x < xdim; x++) {
-                    int32_t a = cell(line - 1, x + base);
-                    int32_t c = cell(line - 1, x + base + 1);
-                    int32_t e = cell(line - 1, x + base + 2);
-                    int32_t g = cell(line - 1, x + base + 3);
-                    int32_t b = cell(line + 1, x + base);
-                    int32_t d = cell(line + 1, x + base + 1);
-                    int32_t f = cell(line + 1, x + base + 2);
-                    int32_t h = cell(line + 1, x + base + 3);
-                    uint8_t& dest = cell(line, x);
+                    const int32_t x0 = (x + base) & xMask;
+                    const int32_t x1 = (x0 + 1) & xMask;
+                    const int32_t x2 = (x0 + 2) & xMask;
+                    const int32_t x3 = (x0 + 3) & xMask;
+                    const int32_t a = prevLine[x0];
+                    const int32_t c = prevLine[x1];
+                    const int32_t e = prevLine[x2];
+                    const int32_t g = prevLine[x3];
+                    const int32_t b = nextLine[x0];
+                    const int32_t d = nextLine[x1];
+                    const int32_t f = nextLine[x2];
+                    const int32_t h = nextLine[x3];
+                    uint8_t& dest = curLine[x];
                     dest = wave[(e + g + f + h) - (dest << 1)];
-                    int32_t ea = e - a;
-                    int32_t fb = f - b;
-                    int32_t gc = g - c;
-                    int32_t hd = h - d;
-                    int32_t row = even ? y * 2 - 1 : y * 2;
-                    int32_t column = even ? x * 2 - 1 : x * 2;
-                    int32_t right = (gc + hd) >> 1;
-                    pixel(row, column + 1) = table[right * 2];
-                    pixel(row + 1, column) = table[fb + hd];
-                    pixel(row, column) = table[right + ((fb + ea) >> 1)];
-                    pixel(row + 1, column + 1) = table[hd + hd];
+                    const int32_t ea = e - a;
+                    const int32_t fb = f - b;
+                    const int32_t gc = g - c;
+                    const int32_t hd = h - d;
+                    const int32_t col0 = (even ? ((x << 1) - 1) : (x << 1)) & umask;
+                    const int32_t col1 = (col0 + 1) & umask;
+                    const int32_t right = (gc + hd) >> 1;
+                    pixRow0[col1] = table[right << 1];
+                    pixRow1[col0] = table[fb + hd];
+                    pixRow0[col0] = table[right + ((fb + ea) >> 1)];
+                    pixRow1[col1] = table[hd + hd];
                 }
             }
         }
@@ -1509,16 +1531,26 @@ namespace dx {
 
         width = static_cast<uint32_t>(state.usize);
         height = static_cast<uint32_t>(state.vsize);
-        rgba.resize(state.pixels.size() * 4);
+        const size_t pixelCount = state.pixels.size();
+        rgba.resize(pixelCount * 4);
         UPalette* palette = state.palette;
         const uint32_t* colors = palette && palette->colors.size() >= 256 ? palette->colors.data() : nullptr;
-        for (size_t i = 0; i < state.pixels.size(); i++) {
-            uint8_t index = state.pixels[i];
-            uint32_t color = colors ? colors[index] : (0xff000000u | index * 0x010101u);
-            rgba[i * 4 + 0] = static_cast<uint8_t>(color & 0xff);
-            rgba[i * 4 + 1] = static_cast<uint8_t>((color >> 8) & 0xff);
-            rgba[i * 4 + 2] = static_cast<uint8_t>((color >> 16) & 0xff);
-            rgba[i * 4 + 3] = index == 0 ? 0 : 255;
+        uint32_t lut[256];
+        if (colors) {
+            lut[0] = colors[0] & 0x00ffffffu;
+            for (int i = 1; i < 256; i++) {
+                lut[i] = (colors[i] & 0x00ffffffu) | 0xff000000u;
+            }
+        } else {
+            lut[0] = 0u;
+            for (uint32_t i = 1; i < 256; i++) {
+                lut[i] = 0xff000000u | (i * 0x010101u);
+            }
+        }
+        const uint8_t* src = state.pixels.data();
+        uint32_t* dst = reinterpret_cast<uint32_t*>(rgba.data());
+        for (size_t i = 0; i < pixelCount; i++) {
+            dst[i] = lut[src[i]];
         }
         return true;
     }

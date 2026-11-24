@@ -13,21 +13,23 @@
 
 namespace dx {
     namespace {
-        struct NativeRegistry {
-            std::vector<NativeFunction> byIndex = std::vector<NativeFunction>(4096, nullptr);
-            std::vector<UFunction*> indexFunctions = std::vector<UFunction*>(4096, nullptr);
+        struct NativeMaps {
             std::unordered_map<std::string, NativeFunction> byName;
             std::set<std::string> warned;
-            UFunction* current = nullptr;
-            Frame* frame = nullptr;
-            int depth = 0;
-            uint32_t assertionFailures = 0;
-            int32_t runaway = 0;
         };
 
-        NativeRegistry& natives()
+        NativeFunction gNativeByIndex[4096] = {};
+        UFunction* gNativeIndexFuncs[4096] = {};
+        UFunction* gCurrentNative = nullptr;
+        Frame* gCurrentFrame = nullptr;
+        int gCallDepth = 0;
+        uint32_t gAssertionFailures = 0;
+        int32_t gRunaway = 0;
+        const bool gTracing = std::getenv("DX_TRACE") != nullptr;
+
+        NativeMaps& nativeMaps()
         {
-            static NativeRegistry instance;
+            static NativeMaps instance;
             return instance;
         }
 
@@ -122,7 +124,7 @@ namespace dx {
 
         void unimplementedNative(UObject*, Frame& stack, void* result)
         {
-            UFunction* function = natives().current;
+            UFunction* function = gCurrentNative;
             if (!function) {
                 while (*stack.code != vm::EX_EndFunctionParms) {
                     stack.step(stack.object, nullptr);
@@ -131,7 +133,7 @@ namespace dx {
                 return;
             }
             std::string key = function->outer ? function->outer->name.str() + "." + function->name.str() : function->name.str();
-            if (natives().warned.insert(key).second) {
+            if (nativeMaps().warned.insert(key).second) {
                 std::fprintf(stderr, "unimplemented native %s (%d)\n", key.c_str(), function->nativeIndex);
             }
             for (UProperty* param : function->params) {
@@ -154,24 +156,22 @@ namespace dx {
             }
         }
 
-        bool tracing()
+        inline void traceCall(const char* kind, UObject* context, UFunction* function)
         {
-            static bool enabled = std::getenv("DX_TRACE") != nullptr;
-            return enabled;
-        }
-
-        void traceCall(const char* kind, UObject* context, UFunction* function)
-        {
-            if (!tracing() || !function) {
+            if (!gTracing || !function) {
                 return;
             }
-            std::fprintf(stderr, "%*s%s %s.%s\n", natives().depth * 2, "", kind, context ? context->name.c_str() : "None", function->pathName().c_str());
+            std::fprintf(stderr, "%*s%s %s.%s\n", gCallDepth * 2, "", kind, context ? context->name.c_str() : "None", function->pathName().c_str());
         }
 
-        void callNative(Frame& stack, UObject* context, UFunction* function, NativeFunction native, void* result)
+        inline void callNative(Frame& stack, UObject* context, UFunction* function, NativeFunction native, void* result)
         {
-            traceCall("native", context, function);
-            natives().current = function;
+            if (gTracing) {
+                traceCall("native", context, function);
+            }
+            if (native == unimplementedNative) {
+                gCurrentNative = function;
+            }
             native(context, stack, result);
         }
 
@@ -347,16 +347,16 @@ namespace dx {
             return;
         }
         case 0x06:
-            if (++natives().runaway > 10000000) {
+            if (++gRunaway > 10000000) {
                 vm::critical(*this, "Runaway loop detected (over 10000000 iterations)");
-                natives().runaway = 0;
+                gRunaway = 0;
             }
             jump(readWord());
             return;
         case 0x07: {
-            if (++natives().runaway > 10000000) {
+            if (++gRunaway > 10000000) {
                 vm::critical(*this, "Runaway loop detected (over 10000000 iterations)");
-                natives().runaway = 0;
+                gRunaway = 0;
             }
             uint16_t offset = readWord();
             uint32_t value = 0;
@@ -374,7 +374,7 @@ namespace dx {
             uint32_t value = 0;
             step(object, &value);
             if (!value) {
-                natives().assertionFailures++;
+                gAssertionFailures++;
                 vm::critical(*this, "Assertion failed, line " + std::to_string(line));
             }
             return;
@@ -911,9 +911,12 @@ namespace dx {
         if (nativeIndex < 0) {
             throw std::runtime_error("unknown bytecode token " + std::to_string(token) + " in " + (node ? node->pathName() : std::string("?")));
         }
-        NativeRegistry& registry = natives();
-        NativeFunction native = registry.byIndex[static_cast<size_t>(nativeIndex)];
-        UFunction* function = registry.indexFunctions[static_cast<size_t>(nativeIndex)];
+        NativeFunction native = gNativeByIndex[static_cast<size_t>(nativeIndex)];
+        if (native && !gTracing) {
+            native(context, *this, result);
+            return;
+        }
+        UFunction* function = gNativeIndexFuncs[static_cast<size_t>(nativeIndex)];
         if (!native) {
             native = unimplementedNative;
         }
@@ -923,20 +926,19 @@ namespace dx {
     namespace vm {
         void registerNative(int32_t index, NativeFunction function)
         {
-            natives().byIndex[static_cast<size_t>(index)] = function;
+            gNativeByIndex[static_cast<size_t>(index)] = function;
         }
 
         void registerNative(std::string_view className, std::string_view functionName, NativeFunction function)
         {
-            natives().byName[lowerKey(className) + "." + lowerKey(functionName)] = function;
+            nativeMaps().byName[lowerKey(className) + "." + lowerKey(functionName)] = function;
         }
 
         NativeFunction bindNative(UFunction* function)
         {
-            NativeRegistry& registry = natives();
             if (function->nativeIndex > 0 && function->nativeIndex < 4096) {
-                registry.indexFunctions[function->nativeIndex] = function;
-                NativeFunction native = registry.byIndex[function->nativeIndex];
+                gNativeIndexFuncs[function->nativeIndex] = function;
+                NativeFunction native = gNativeByIndex[function->nativeIndex];
                 if (native) {
                     return native;
                 }
@@ -946,10 +948,11 @@ namespace dx {
                 owner = owner->outer;
             }
             if (owner) {
-                auto it = registry.byName.find(lowerKey(owner->name.str()) + "." + lowerKey(function->name.str()));
-                if (it != registry.byName.end()) {
+                auto& byName = nativeMaps().byName;
+                auto it = byName.find(lowerKey(owner->name.str()) + "." + lowerKey(function->name.str()));
+                if (it != byName.end()) {
                     if (function->nativeIndex > 0 && function->nativeIndex < 4096) {
-                        registry.byIndex[function->nativeIndex] = it->second;
+                        gNativeByIndex[function->nativeIndex] = it->second;
                     }
                     return it->second;
                 }
@@ -959,7 +962,7 @@ namespace dx {
 
         uint32_t assertionFailures()
         {
-            return natives().assertionFailures;
+            return gAssertionFailures;
         }
 
         CriticalHandler& criticalHandler()
@@ -999,8 +1002,8 @@ namespace dx {
 
         void resetRunaway()
         {
-            natives().runaway = 0;
-            natives().depth = 0;
+            gRunaway = 0;
+            gCallDepth = 0;
         }
 
         void warn(const Frame& frame, const std::string& message)
@@ -1017,12 +1020,12 @@ namespace dx {
         void execute(Frame& frame)
         {
             const uint8_t* end = frame.node->script.data() + frame.node->script.size();
-            Frame* saved = natives().frame;
-            natives().frame = &frame;
+            Frame* saved = gCurrentFrame;
+            gCurrentFrame = &frame;
             while (frame.code && frame.code < end) {
                 frame.step(frame.object, nullptr);
             }
-            natives().frame = saved;
+            gCurrentFrame = saved;
         }
 
         void callFunction(Frame& stack, UObject* context, UFunction* function, void* result)
@@ -1046,8 +1049,7 @@ namespace dx {
                 function->link();
             }
 
-            NativeRegistry& registry = natives();
-            if (registry.depth > 250) {
+            if (gCallDepth > 250) {
                 critical(stack, "Infinite script recursion (250 calls) detected");
                 while (*stack.code != EX_EndFunctionParms) {
                     stack.step(stack.object, nullptr);
@@ -1116,7 +1118,7 @@ namespace dx {
                 if (singular) {
                     context->singular = true;
                 }
-                registry.depth++;
+                gCallDepth++;
                 try {
                     if (function->scriptOverride) {
                         frame.code = function->stub.data();
@@ -1125,14 +1127,14 @@ namespace dx {
                         execute(frame);
                     }
                 } catch (...) {
-                    registry.depth--;
+                    gCallDepth--;
                     if (singular) {
                         context->singular = false;
                     }
                     function->destroyValue(localsPtr);
                     throw;
                 }
-                registry.depth--;
+                gCallDepth--;
                 if (singular) {
                     context->singular = false;
                 }
@@ -1309,8 +1311,8 @@ namespace dx {
                 return;
             }
             frame.running = true;
-            Frame* saved = natives().frame;
-            natives().frame = &frame;
+            Frame* saved = gCurrentFrame;
+            gCurrentFrame = &frame;
             UState* lastState = frame.state;
             int32_t stateChanges = 0;
             try {
@@ -1332,7 +1334,7 @@ namespace dx {
                 std::fprintf(stderr, "script error in state code of %s: %s\n", object->name.c_str(), error.what());
                 frame.code = nullptr;
             }
-            natives().frame = saved;
+            gCurrentFrame = saved;
             frame.running = false;
         }
 
@@ -1604,16 +1606,15 @@ namespace dx {
             frame.node = function;
             frame.code = function->script.data();
             frame.locals = bufferPtr;
-            frame.previous = natives().frame;
-            NativeRegistry& registry = natives();
-            if (registry.depth > 250) {
+            frame.previous = gCurrentFrame;
+            if (gCallDepth > 250) {
                 critical(frame, "Infinite script recursion (250 calls) detected");
                 return;
             }
             if (singular) {
                 object->singular = true;
             }
-            registry.depth++;
+            gCallDepth++;
             try {
                 if (function->scriptOverride) {
                     frame.code = function->stub.data();
@@ -1624,7 +1625,7 @@ namespace dx {
             } catch (const std::exception& error) {
                 std::fprintf(stderr, "script error in %s: %s\n", function->pathName().c_str(), error.what());
             }
-            registry.depth--;
+            gCallDepth--;
             if (singular) {
                 object->singular = false;
             }

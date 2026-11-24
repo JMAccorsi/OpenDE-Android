@@ -32,6 +32,7 @@ namespace dx {
         void setOcclusion(float weight);
         void setGamma(float exponent);
         void setBlend(BlendMode mode);
+        void setCulling(bool enabled);
         void setDynamicLights(const std::vector<DynamicLight>& lights);
         void bindTexture(uint32_t texture);
         void bindLightmap(uint32_t texture);
@@ -43,6 +44,9 @@ namespace dx {
         void bindStatic(uint32_t vao);
         void drawStatic(uint32_t vao, int32_t first, int32_t count);
         void drawStaticRanges(uint32_t vao, const int32_t* firsts, const int32_t* counts, int32_t ranges);
+        uint32_t* beginStaticIndexUpload(uint32_t vao, size_t indexCount, size_t& outByteOffset);
+        void endStaticIndexUpload();
+        void drawStaticIndexed(uint32_t vao, size_t byteOffset, int32_t count);
         uint32_t createStatic(const std::vector<GLVertex>& vertices, uint32_t& buffer);
         void invalidateTexture();
         void invalidateLightmap();
@@ -91,14 +95,16 @@ namespace dx {
         int32_t stream(const std::vector<GLVertex>& vertices);
         bool select(int32_t index);
         int32_t targetIndex() const;
-        void markOthersStale();
+        void markOthersDirty(uint32_t mask);
         void sendState();
+        void syncDirtyState();
         float activeGamma() const;
         void bindVao(uint32_t vao);
 
         uint32_t programs[6] = {};
         Locations locations[6];
-        bool stale[6] = {};
+        uint32_t dirtyMask[6] = {};
+        float programGamma[6] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
         int32_t current = 0;
         State state;
         bool smoothLightmapActive = false;
@@ -107,6 +113,8 @@ namespace dx {
         uint32_t boundVao = ~0u;
         BlendMode currentBlend = BlendMode::Opaque;
         bool blendInitialized = false;
+        bool cullInitialized = false;
+        bool cullEnabled = false;
         bool hasViewProj = false;
         bool hasEye = false;
         uint32_t streamVaos[StreamRingCount] = {};

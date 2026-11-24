@@ -479,7 +479,15 @@ namespace dx {
     void LightmapAtlas::animate(UModel* model, float time, uint64_t frame, const std::function<bool(size_t surf, uint64_t zones)>& visible)
     {
         std::vector<uint8_t> bytes;
-        for (Animated& entry : animated) {
+#ifdef __ANDROID__
+        constexpr size_t kStep = 2;
+        const size_t start = static_cast<size_t>(frame & 1u);
+#else
+        constexpr size_t kStep = 1;
+        const size_t start = 0;
+#endif
+        for (size_t i = start; i < animated.size(); i += kStep) {
+            Animated& entry = animated[i];
             if (entry.frame == frame || !visible(entry.surf, entry.zones)) {
                 continue;
             }

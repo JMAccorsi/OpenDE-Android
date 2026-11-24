@@ -60,9 +60,13 @@ namespace dx {
 
     void CollisionHash::clear()
     {
+        for (Entry& entry : entries) {
+            if (entry.live && entry.actor && entry.actor->collisionSlot >= 0 && static_cast<size_t>(entry.actor->collisionSlot) < entries.size() && entries[static_cast<size_t>(entry.actor->collisionSlot)].actor == entry.actor) {
+                entry.actor->collisionSlot = -1;
+            }
+        }
         entries.clear();
         freeSlots.clear();
-        slots.clear();
         cells.clear();
         alwaysSlots.clear();
         staleScratch.clear();
@@ -147,12 +151,15 @@ namespace dx {
             return -1;
         }
         if (actor->destroyed || !actor->data || !actor::bCollideActors(actor)) {
-            remove(actor);
+            if (actor->collisionSlot >= 0) {
+                remove(actor);
+            }
             return -1;
         }
         uint32_t slot = 0;
-        auto it = slots.find(actor);
-        if (it == slots.end()) {
+        if (actor->collisionSlot >= 0 && static_cast<size_t>(actor->collisionSlot) < entries.size() && entries[static_cast<size_t>(actor->collisionSlot)].live && entries[static_cast<size_t>(actor->collisionSlot)].actor == actor) {
+            slot = static_cast<uint32_t>(actor->collisionSlot);
+        } else {
             if (freeSlots.empty()) {
                 slot = static_cast<uint32_t>(entries.size());
                 entries.emplace_back();
@@ -165,11 +172,18 @@ namespace dx {
             entry.actor = actor;
             entry.order = nextOrder++;
             entry.live = true;
-            slots[actor] = slot;
-        } else {
-            slot = it->second;
+            actor->collisionSlot = static_cast<int32_t>(slot);
         }
         if (isBrush(actor)) {
+            Entry& entry = entries[slot];
+            const Vector loc = actor::Location(actor);
+            const Rotator rot = actor::Rotation(actor);
+            if (entry.placed && entry.hasBrushCache && entry.lastBrushLoc == loc && entry.lastBrushRot == rot) {
+                return static_cast<int32_t>(slot);
+            }
+            entry.lastBrushLoc = loc;
+            entry.lastBrushRot = rot;
+            entry.hasBrushCache = true;
             Vector min;
             Vector max;
             if (brushBounds(actor, min, max)) {
@@ -193,15 +207,18 @@ namespace dx {
 
     void CollisionHash::remove(UObject* actor)
     {
-        auto it = slots.find(actor);
-        if (it == slots.end()) {
+        if (!actor || actor->collisionSlot < 0) {
             return;
         }
-        uint32_t slot = it->second;
+        uint32_t slot = static_cast<uint32_t>(actor->collisionSlot);
+        if (slot >= entries.size() || !entries[slot].live || entries[slot].actor != actor) {
+            actor->collisionSlot = -1;
+            return;
+        }
         erase(slot);
         entries[slot] = Entry();
         freeSlots.push_back(slot);
-        slots.erase(it);
+        actor->collisionSlot = -1;
     }
 
     void CollisionHash::sync(const std::vector<UObject*>& actors, size_t firstDynamic)

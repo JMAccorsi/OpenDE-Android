@@ -52,9 +52,19 @@ namespace dx {
     void TextureCache::clear()
     {
         for (auto& [texture, info] : textures) {
-            glDeleteTextures(1, &info.id);
+            if (!info.procedural) {
+                glDeleteTextures(1, &info.id);
+            }
         }
         textures.clear();
+        for (auto& [texture, ring] : proceduralRings) {
+            for (uint32_t id : ring.ids) {
+                if (id) {
+                    glDeleteTextures(1, &id);
+                }
+            }
+        }
+        proceduralRings.clear();
         for (auto& [texture, info] : maskedTextures) {
             glDeleteTextures(1, &info.id);
         }
@@ -161,17 +171,38 @@ namespace dx {
                 return it != textures.end() ? &it->second : nullptr;
             }
             GLTextureInfo& info = textures[texture];
-            bool sameFormat = info.id != 0 && info.width == width && info.height == height;
-            info.procedural = true;
-            if (!info.id) {
-                glGenTextures(1, &info.id);
+            ProceduralRing& ring = proceduralRings[texture];
+            bool sameFormat = ring.width == width && ring.height == height;
+            if (!sameFormat) {
+                for (uint32_t& id : ring.ids) {
+                    if (id) {
+                        glDeleteTextures(1, &id);
+                        id = 0;
+                    }
+                }
+                ring.width = width;
+                ring.height = height;
+                ring.nextSlot = 0;
             }
+#ifdef __ANDROID__
+            constexpr uint8_t kRingSlots = 3;
+#else
+            constexpr uint8_t kRingSlots = 1;
+#endif
+            uint8_t slot = ring.nextSlot;
+            ring.nextSlot = static_cast<uint8_t>((slot + 1) % kRingSlots);
+            bool slotAllocated = ring.ids[slot] != 0;
+            if (!slotAllocated) {
+                glGenTextures(1, &ring.ids[slot]);
+            }
+            info.id = ring.ids[slot];
+            info.procedural = true;
             info.width = width;
             info.height = height;
             info.masked = texture->masked();
             glBindTexture(GL_TEXTURE_2D, info.id);
             boundChanged = true;
-            if (sameFormat) {
+            if (slotAllocated && sameFormat) {
                 glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(width), static_cast<GLsizei>(height), GL_RGBA, GL_UNSIGNED_BYTE, proceduralRgba.data());
             } else {
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, static_cast<GLsizei>(width), static_cast<GLsizei>(height), 0, GL_RGBA, GL_UNSIGNED_BYTE, proceduralRgba.data());

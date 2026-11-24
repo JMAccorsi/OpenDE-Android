@@ -66,6 +66,9 @@ namespace dx {
         void bindStatic(uint32_t geometry) override;
         void drawStatic(uint32_t geometry, int32_t first, int32_t count) override;
         void drawStaticRanges(uint32_t geometry, const int32_t* firsts, const int32_t* counts, int32_t ranges) override;
+        uint32_t* beginStaticIndexUpload(uint32_t geometry, size_t indexCount, size_t& outByteOffset) override;
+        void endStaticIndexUpload() override;
+        void drawStaticIndexed(uint32_t geometry, size_t byteOffset, int32_t count) override;
 
         uint32_t createQuery() override;
         void deleteQuery(uint32_t query) override;

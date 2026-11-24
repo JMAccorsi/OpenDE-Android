@@ -43,10 +43,10 @@ out vec4 vClip1;
 #endif
 centroid out vec2 vUV;
 centroid out vec2 vLightUV;
-out vec4 vColor;
+out mediump vec4 vColor;
 out vec3 vWorld;
-out vec3 vNormal;
-out vec3 vFog;
+out mediump vec3 vNormal;
+out mediump vec3 vFog;
 void main()
 {
     vFog = aFog;
@@ -88,10 +88,10 @@ void main()
         const char* fragmentSource = R"(
 centroid in vec2 vUV;
 centroid in vec2 vLightUV;
-in vec4 vColor;
+in mediump vec4 vColor;
 in vec3 vWorld;
-in vec3 vNormal;
-in vec3 vFog;
+in mediump vec3 vNormal;
+in mediump vec3 vFog;
 #if defined(CLIP_PLANES) && !defined(HARDWARE_CLIP)
 in vec4 vClip0;
 in vec4 vClip1;
@@ -176,8 +176,12 @@ void main()
     occlusionMask = vec4(uOcclusion);
     if ((uFlags & 32) != 0)
     {
-        mediump vec3 vc = vColor.rgb;
         mediump float va = vColor.a;
+        if (va <= 0.0)
+        {
+            discard;
+        }
+        mediump vec3 vc = vColor.rgb;
         fragColor = vec4(mix(vc, texture(uTexture, vUV).rgb, va), 1.0);
         return;
     }
@@ -686,11 +690,11 @@ void main()
         glEnableVertexAttribArray(2);
         glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, sizeof(GLVertex), reinterpret_cast<const void*>(offsetof(GLVertex, lu)));
         glEnableVertexAttribArray(3);
-        glVertexAttribPointer(3, 4, GL_FLOAT, GL_FALSE, sizeof(GLVertex), reinterpret_cast<const void*>(offsetof(GLVertex, r)));
+        glVertexAttribPointer(3, 4, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GLVertex), reinterpret_cast<const void*>(offsetof(GLVertex, r)));
         glEnableVertexAttribArray(4);
-        glVertexAttribPointer(4, 3, GL_FLOAT, GL_FALSE, sizeof(GLVertex), reinterpret_cast<const void*>(offsetof(GLVertex, nx)));
+        glVertexAttribPointer(4, 3, GL_BYTE, GL_TRUE, sizeof(GLVertex), reinterpret_cast<const void*>(offsetof(GLVertex, nx)));
         glEnableVertexAttribArray(5);
-        glVertexAttribPointer(5, 3, GL_FLOAT, GL_FALSE, sizeof(GLVertex), reinterpret_cast<const void*>(offsetof(GLVertex, fogR)));
+        glVertexAttribPointer(5, 3, GL_UNSIGNED_BYTE, GL_TRUE, sizeof(GLVertex), reinterpret_cast<const void*>(offsetof(GLVertex, fogR)));
     }
 
     void UberShader::invalidateTexture()
@@ -723,11 +727,24 @@ void main()
         }
     }
 
-    void UberShader::markOthersStale()
+    namespace {
+        constexpr uint32_t DIRTY_ViewProj = 1u << 0;
+        constexpr uint32_t DIRTY_Flags = 1u << 1;
+        constexpr uint32_t DIRTY_Pan = 1u << 2;
+        constexpr uint32_t DIRTY_Scale = 1u << 3;
+        constexpr uint32_t DIRTY_Tint = 1u << 4;
+        constexpr uint32_t DIRTY_Lights = 1u << 5;
+        constexpr uint32_t DIRTY_Eye = 1u << 6;
+        constexpr uint32_t DIRTY_Clip = 1u << 7;
+        constexpr uint32_t DIRTY_Occlusion = 1u << 8;
+        constexpr uint32_t DIRTY_Gamma = 1u << 9;
+    }
+
+    void UberShader::markOthersDirty(uint32_t mask)
     {
         for (int32_t i = 0; i < 6; i++) {
             if (i != current) {
-                stale[i] = true;
+                dirtyMask[i] |= mask;
             }
         }
     }
@@ -747,8 +764,23 @@ void main()
         boundLightmap = ~0u;
         boundVao = ~0u;
         blendInitialized = false;
+        cullInitialized = false;
         glActiveTexture(GL_TEXTURE0);
         glUseProgram(programs[current]);
+    }
+
+    void UberShader::setCulling(bool enabled)
+    {
+        if (cullInitialized && cullEnabled == enabled) {
+            return;
+        }
+        cullInitialized = true;
+        cullEnabled = enabled;
+        if (enabled) {
+            glEnable(GL_CULL_FACE);
+        } else {
+            glDisable(GL_CULL_FACE);
+        }
     }
 
     bool UberShader::select(int32_t index)
@@ -758,9 +790,8 @@ void main()
         }
         current = index;
         glUseProgram(programs[current]);
-        if (stale[current]) {
-            sendState();
-            stale[current] = false;
+        if (dirtyMask[current] != 0) {
+            syncDirtyState();
             return true;
         }
         return false;
@@ -787,7 +818,65 @@ void main()
         }
         glUniform1i(location.clipCount, state.clipCount);
         glUniform1f(location.occlusion, state.occlusion);
-        glUniform1f(location.gamma, activeGamma());
+        const float gammaVal = activeGamma();
+        glUniform1f(location.gamma, gammaVal);
+        programGamma[current] = gammaVal;
+        dirtyMask[current] = 0;
+    }
+
+    void UberShader::syncDirtyState()
+    {
+        uint32_t mask = dirtyMask[current];
+        const Locations& location = locations[current];
+        if (mask & DIRTY_ViewProj) {
+            glUniformMatrix4fv(location.viewProj, 1, GL_FALSE, state.viewProj.data());
+        }
+        if (mask & DIRTY_Flags) {
+            glUniform1i(location.flags, state.flags);
+        }
+        if (mask & DIRTY_Pan) {
+            glUniform2fv(location.pan, 1, state.pan);
+        }
+        if (mask & DIRTY_Scale) {
+            glUniform2fv(location.scale, 1, state.scale);
+        }
+        if (mask & DIRTY_Tint) {
+            glUniform4fv(location.tint, 1, state.tint);
+        }
+        uint32_t remaining = 0;
+        if (mask & DIRTY_Lights) {
+            if (state.flags & SHADER_Dynamic) {
+                glUniform1i(location.lightCount, state.lightCount);
+                if (state.lightCount > 0) {
+                    glUniform4fv(location.lightPosition, state.lightCount, state.lightPositions);
+                    glUniform4fv(location.lightColor, state.lightCount, state.lightColors);
+                    glUniform4fv(location.lightDirection, state.lightCount, state.lightDirections);
+                }
+            } else {
+                remaining |= DIRTY_Lights;
+            }
+        }
+        if (mask & DIRTY_Eye) {
+            glUniform3fv(location.eye, 1, state.eye);
+            glUniform3fv(location.forward, 1, state.forward);
+        }
+        if (mask & DIRTY_Clip) {
+            if (state.clipCount > 0) {
+                glUniform4fv(location.clipPlanes, state.clipCount, state.clipPlanes);
+            }
+            glUniform1i(location.clipCount, state.clipCount);
+        }
+        if (mask & DIRTY_Occlusion) {
+            glUniform1f(location.occlusion, state.occlusion);
+        }
+        if (mask & DIRTY_Gamma) {
+            const float gammaVal = activeGamma();
+            if (programGamma[current] != gammaVal) {
+                glUniform1f(location.gamma, gammaVal);
+                programGamma[current] = gammaVal;
+            }
+        }
+        dirtyMask[current] = remaining;
     }
 
     void UberShader::setViewProj(const Mat4& matrix)
@@ -797,7 +886,7 @@ void main()
         }
         hasViewProj = true;
         state.viewProj = matrix;
-        markOthersStale();
+        markOthersDirty(DIRTY_ViewProj);
         glUniformMatrix4fv(locations[current].viewProj, 1, GL_FALSE, matrix.data());
     }
 
@@ -822,10 +911,20 @@ void main()
             return;
         }
         state.flags = flags;
-        markOthersStale();
+        markOthersDirty(DIRTY_Flags);
         int32_t wanted = targetIndex();
         if (!select(wanted)) {
             glUniform1i(locations[current].flags, flags);
+            if ((flags & SHADER_Dynamic) && (dirtyMask[current] & DIRTY_Lights)) {
+                const Locations& location = locations[current];
+                glUniform1i(location.lightCount, state.lightCount);
+                if (state.lightCount > 0) {
+                    glUniform4fv(location.lightPosition, state.lightCount, state.lightPositions);
+                    glUniform4fv(location.lightColor, state.lightCount, state.lightColors);
+                    glUniform4fv(location.lightDirection, state.lightCount, state.lightDirections);
+                }
+                dirtyMask[current] &= ~DIRTY_Lights;
+            }
         }
     }
 
@@ -836,7 +935,7 @@ void main()
         }
         state.pan[0] = u;
         state.pan[1] = v;
-        markOthersStale();
+        markOthersDirty(DIRTY_Pan);
         glUniform2f(locations[current].pan, u, v);
     }
 
@@ -847,7 +946,7 @@ void main()
         }
         state.scale[0] = u;
         state.scale[1] = v;
-        markOthersStale();
+        markOthersDirty(DIRTY_Scale);
         glUniform2f(locations[current].scale, u, v);
     }
 
@@ -863,7 +962,7 @@ void main()
         state.forward[0] = forward.x;
         state.forward[1] = forward.y;
         state.forward[2] = forward.z;
-        markOthersStale();
+        markOthersDirty(DIRTY_Eye);
         glUniform3f(locations[current].eye, eye.x, eye.y, eye.z);
         glUniform3f(locations[current].forward, forward.x, forward.y, forward.z);
     }
@@ -878,7 +977,7 @@ void main()
             std::copy(planes, planes + count * 4, state.clipPlanes);
         }
         state.clipCount = count;
-        markOthersStale();
+        markOthersDirty(DIRTY_Clip);
         int32_t wanted = targetIndex();
         if (!select(wanted)) {
             if (count > 0) {
@@ -894,7 +993,7 @@ void main()
             return;
         }
         state.occlusion = weight;
-        markOthersStale();
+        markOthersDirty(DIRTY_Occlusion);
         glUniform1f(locations[current].occlusion, weight);
     }
 
@@ -912,8 +1011,12 @@ void main()
             return;
         }
         state.gamma = exponent;
-        markOthersStale();
-        glUniform1f(locations[current].gamma, activeGamma());
+        const float gammaVal = activeGamma();
+        markOthersDirty(DIRTY_Gamma);
+        if (programGamma[current] != gammaVal) {
+            glUniform1f(locations[current].gamma, gammaVal);
+            programGamma[current] = gammaVal;
+        }
     }
 
     void UberShader::setTint(float r, float g, float b, float a)
@@ -925,7 +1028,7 @@ void main()
         state.tint[1] = g;
         state.tint[2] = b;
         state.tint[3] = a;
-        markOthersStale();
+        markOthersDirty(DIRTY_Tint);
         glUniform4f(locations[current].tint, r, g, b, a);
     }
 
@@ -934,14 +1037,14 @@ void main()
         if (blendInitialized && mode == currentBlend) {
             return;
         }
-        const float prevGamma = blendInitialized ? activeGamma() : -1.0f;
         currentBlend = mode;
         blendInitialized = true;
         const float nextGamma = activeGamma();
-        if (nextGamma != prevGamma) {
-            markOthersStale();
+        if (programGamma[current] != nextGamma) {
             glUniform1f(locations[current].gamma, nextGamma);
+            programGamma[current] = nextGamma;
         }
+        markOthersDirty(DIRTY_Gamma);
         switch (mode) {
         case BlendMode::Opaque:
         case BlendMode::Masked:
@@ -976,9 +1079,6 @@ void main()
         float* positions = state.lightPositions;
         float* colors = state.lightColors;
         float* directions = state.lightDirections;
-        std::fill(std::begin(state.lightPositions), std::end(state.lightPositions), 0.0f);
-        std::fill(std::begin(state.lightColors), std::end(state.lightColors), 0.0f);
-        std::fill(std::begin(state.lightDirections), std::end(state.lightDirections), 0.0f);
         size_t count = std::min(lights.size(), MaxDynamicLights);
         for (size_t i = 0; i < count; i++) {
             const DynamicLight& light = lights[i];
@@ -989,18 +1089,22 @@ void main()
             colors[i * 4 + 0] = light.color.x;
             colors[i * 4 + 1] = light.color.y;
             colors[i * 4 + 2] = light.color.z;
+            colors[i * 4 + 3] = 0.0f;
             directions[i * 4 + 0] = light.direction.x;
             directions[i * 4 + 1] = light.direction.y;
             directions[i * 4 + 2] = light.direction.z;
             directions[i * 4 + 3] = light.cone;
         }
         state.lightCount = static_cast<int32_t>(count);
-        markOthersStale();
+        markOthersDirty(DIRTY_Lights);
         const Locations& location = locations[current];
         glUniform1i(location.lightCount, state.lightCount);
-        glUniform4fv(location.lightPosition, static_cast<GLsizei>(MaxDynamicLights), positions);
-        glUniform4fv(location.lightColor, static_cast<GLsizei>(MaxDynamicLights), colors);
-        glUniform4fv(location.lightDirection, static_cast<GLsizei>(MaxDynamicLights), directions);
+        if (state.lightCount > 0) {
+            glUniform4fv(location.lightPosition, state.lightCount, positions);
+            glUniform4fv(location.lightColor, state.lightCount, colors);
+            glUniform4fv(location.lightDirection, state.lightCount, directions);
+        }
+        dirtyMask[current] &= ~DIRTY_Lights;
     }
 
     void UberShader::bindTexture(uint32_t texture)
@@ -1252,6 +1356,71 @@ void main()
                 frameTriangles += counts[i] / 3;
             }
         }
+#endif
+    }
+
+    uint32_t* UberShader::beginStaticIndexUpload(uint32_t vao, size_t indexCount, size_t& outByteOffset)
+    {
+#ifdef __ANDROID__
+        if (indexCount == 0) {
+            return nullptr;
+        }
+        bindVao(vao);
+        const size_t bytes = indexCount * sizeof(uint32_t);
+        uint32_t& ebo = streamEbos[streamRingIndex];
+        size_t& cap = streamEboCapacities[streamRingIndex];
+        if (bytes > cap || streamEboOffset + bytes > cap) {
+            size_t newCap = std::max(cap, std::max(bytes, size_t { 1 } << 20));
+            if (streamEboOffset > 0) {
+                if (ebo) {
+                    glDeleteBuffers(1, &ebo);
+                }
+                glGenBuffers(1, &ebo);
+                newCap = std::max(newCap, bytes);
+            }
+            cap = newCap;
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+            glBufferData(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLsizeiptr>(cap), nullptr, GL_STREAM_DRAW);
+            streamEboOffset = 0;
+        } else {
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
+        }
+        void* mapped = glMapBufferRange(GL_ELEMENT_ARRAY_BUFFER, static_cast<GLintptr>(streamEboOffset), static_cast<GLsizeiptr>(bytes), GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT);
+        if (!mapped) {
+            return nullptr;
+        }
+        outByteOffset = streamEboOffset;
+        streamEboOffset += bytes;
+        return static_cast<uint32_t*>(mapped);
+#else
+        (void)vao;
+        (void)indexCount;
+        (void)outByteOffset;
+        return nullptr;
+#endif
+    }
+
+    void UberShader::endStaticIndexUpload()
+    {
+#ifdef __ANDROID__
+        glUnmapBuffer(GL_ELEMENT_ARRAY_BUFFER);
+#endif
+    }
+
+    void UberShader::drawStaticIndexed(uint32_t vao, size_t byteOffset, int32_t count)
+    {
+#ifdef __ANDROID__
+        if (count <= 0) {
+            return;
+        }
+        bindVao(vao);
+        glDrawElements(GL_TRIANGLES, count, GL_UNSIGNED_INT, reinterpret_cast<const void*>(byteOffset));
+        frameDrawCalls++;
+        frameTriangles += count / 3;
+#else
+        (void)vao;
+        (void)byteOffset;
+        (void)count;
 #endif
     }
 

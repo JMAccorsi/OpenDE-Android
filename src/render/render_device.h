@@ -3,6 +3,7 @@
 #include "engine/canvas.h"
 #include "render/gl_math.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <vector>
 
@@ -17,17 +18,54 @@ namespace dx {
         float v = 0;
         float lu = 0;
         float lv = 0;
-        float r = 1;
-        float g = 1;
-        float b = 1;
-        float a = 1;
-        float nx = 0;
-        float ny = 0;
-        float nz = 1;
-        float fogR = 0;
-        float fogG = 0;
-        float fogB = 0;
+        uint8_t r = 255;
+        uint8_t g = 255;
+        uint8_t b = 255;
+        uint8_t a = 255;
+        int8_t nx = 0;
+        int8_t ny = 0;
+        int8_t nz = 127;
+        int8_t nPad = 0;
+        uint8_t fogR = 0;
+        uint8_t fogG = 0;
+        uint8_t fogB = 0;
+        uint8_t fogPad = 0;
+
+        static inline uint8_t packUnorm(float value)
+        {
+            const float clamped = std::clamp(value, 0.0f, 1.0f);
+            return static_cast<uint8_t>(clamped * 255.0f + 0.5f);
+        }
+
+        static inline int8_t packSnorm(float value)
+        {
+            const float clamped = std::clamp(value, -1.0f, 1.0f);
+            return static_cast<int8_t>(clamped >= 0.0f ? (clamped * 127.0f + 0.5f) : (clamped * 127.0f - 0.5f));
+        }
+
+        inline void setColor(float cr, float cg, float cb, float ca = 1.0f)
+        {
+            r = packUnorm(cr);
+            g = packUnorm(cg);
+            b = packUnorm(cb);
+            a = packUnorm(ca);
+        }
+
+        inline void setNormal(float xVal, float yVal, float zVal)
+        {
+            nx = packSnorm(xVal);
+            ny = packSnorm(yVal);
+            nz = packSnorm(zVal);
+        }
+
+        inline void setFog(float fr, float fg, float fb)
+        {
+            fogR = packUnorm(fr);
+            fogG = packUnorm(fg);
+            fogB = packUnorm(fb);
+        }
     };
+    static_assert(sizeof(GLVertex) == 40);
 
     struct DynamicLight {
         Vector location;
@@ -144,6 +182,20 @@ namespace dx {
         virtual void bindStatic(uint32_t geometry) = 0;
         virtual void drawStatic(uint32_t geometry, int32_t first, int32_t count) = 0;
         virtual void drawStaticRanges(uint32_t geometry, const int32_t* firsts, const int32_t* counts, int32_t ranges) = 0;
+        virtual uint32_t* beginStaticIndexUpload(uint32_t geometry, size_t indexCount, size_t& outByteOffset)
+        {
+            (void)geometry;
+            (void)indexCount;
+            (void)outByteOffset;
+            return nullptr;
+        }
+        virtual void endStaticIndexUpload() {}
+        virtual void drawStaticIndexed(uint32_t geometry, size_t byteOffset, int32_t count)
+        {
+            (void)geometry;
+            (void)byteOffset;
+            (void)count;
+        }
 
         virtual uint32_t createQuery() = 0;
         virtual void deleteQuery(uint32_t query) = 0;

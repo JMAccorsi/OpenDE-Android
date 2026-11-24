@@ -213,11 +213,7 @@ namespace dx {
 
     void GLRenderDevice::setCulling(bool enabled)
     {
-        if (enabled) {
-            glEnable(GL_CULL_FACE);
-        } else {
-            glDisable(GL_CULL_FACE);
-        }
+        shader->setCulling(enabled);
     }
 
     void GLRenderDevice::setFrontFace(bool clockwise)
@@ -382,6 +378,21 @@ namespace dx {
     void GLRenderDevice::drawStaticRanges(uint32_t geometry, const int32_t* firsts, const int32_t* counts, int32_t ranges)
     {
         shader->drawStaticRanges(geometry, firsts, counts, ranges);
+    }
+
+    uint32_t* GLRenderDevice::beginStaticIndexUpload(uint32_t geometry, size_t indexCount, size_t& outByteOffset)
+    {
+        return shader->beginStaticIndexUpload(geometry, indexCount, outByteOffset);
+    }
+
+    void GLRenderDevice::endStaticIndexUpload()
+    {
+        shader->endStaticIndexUpload();
+    }
+
+    void GLRenderDevice::drawStaticIndexed(uint32_t geometry, size_t byteOffset, int32_t count)
+    {
+        shader->drawStaticIndexed(geometry, byteOffset, count);
     }
 
     uint32_t GLRenderDevice::createQuery()

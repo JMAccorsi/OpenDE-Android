@@ -22,6 +22,9 @@ namespace dx {
             uint64_t order = 0;
             Vector min;
             Vector max;
+            Vector lastBrushLoc;
+            Rotator lastBrushRot;
+            bool hasBrushCache = false;
             int32_t x0 = 0;
             int32_t y0 = 0;
             int32_t x1 = 0;
@@ -43,7 +46,6 @@ namespace dx {
 
         std::vector<Entry> entries;
         std::vector<uint32_t> freeSlots;
-        std::unordered_map<UObject*, uint32_t> slots;
         std::unordered_map<int64_t, std::vector<uint32_t>> cells;
         std::vector<uint32_t> alwaysSlots;
         std::vector<uint32_t> found;

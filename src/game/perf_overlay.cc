@@ -67,13 +67,23 @@ namespace game {
 
         const uint8_t* lookupGlyph(char ch)
         {
-            const char upper = static_cast<char>(std::toupper(static_cast<unsigned char>(ch)));
-            for (const GlyphRows& g : kFont) {
-                if (g.ch == upper) {
-                    return g.rows;
+            static const std::array<const uint8_t*, 128> table = [] {
+                std::array<const uint8_t*, 128> lut;
+                lut.fill(kFont[0].rows);
+                for (const GlyphRows& g : kFont) {
+                    unsigned char uc = static_cast<unsigned char>(g.ch);
+                    if (uc < 128) {
+                        lut[uc] = g.rows;
+                        unsigned char lc = static_cast<unsigned char>(std::tolower(uc));
+                        if (lc < 128 && lc != uc) {
+                            lut[lc] = g.rows;
+                        }
+                    }
                 }
-            }
-            return kFont[0].rows;
+                return lut;
+            }();
+            unsigned char idx = static_cast<unsigned char>(ch);
+            return idx < 128 ? table[idx] : kFont[0].rows;
         }
 
         void drawTextLeft(dx::Canvas2D& canvas, const char* text, float x, float y, float step, const dx::LinearColor& color)

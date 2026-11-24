@@ -672,6 +672,9 @@ namespace dx {
         static const Name nameZoneInfo("ZoneInfo");
         static const Name nameSkyZoneInfo("SkyZoneInfo");
         static const Name nameLevelInfo("LevelInfo");
+        static const Name nameInventory("Inventory");
+        static const Name nameAnimal("Animal");
+        static const Name nameFlockPawn("FlockPawn");
         if (name == nameActor) {
             classTypeBits |= CLS_Actor;
         } else if (name == namePawn) {
@@ -690,6 +693,12 @@ namespace dx {
             classTypeBits |= CLS_SkyZoneInfo;
         } else if (name == nameLevelInfo) {
             classTypeBits |= CLS_LevelInfo;
+        } else if (name == nameInventory) {
+            classTypeBits |= CLS_Inventory;
+        } else if (name == nameAnimal) {
+            classTypeBits |= CLS_Animal;
+        } else if (name == nameFlockPawn) {
+            classTypeBits |= CLS_FlockPawn;
         }
 
         vtable.clear();

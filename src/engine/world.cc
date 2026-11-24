@@ -1075,6 +1075,65 @@ namespace dx {
             }
             return true;
         }
+#ifdef __ANDROID__
+        if (a != localPlayer && !actor::bAlwaysTick(a)) {
+            if (a->hasClassBit(CLS_Animal) || a->hasClassBit(CLS_FlockPawn)) {
+                if (pawn::Enemy(a) == nullptr
+                    && (timeSeconds - actor::LastRenderTime(a)) > 1.5f
+                    && actor::DistanceFromPlayer(a) > 700.0f) {
+                    if (((frame + a->handle) & 3u) != 0) {
+                        return true;
+                    }
+                    deltaSeconds = std::min(deltaSeconds * 4.0f, 0.16f);
+                }
+            } else if (owner && !owner->destroyed && owner != localPlayer) {
+                const float ownerUnseen = timeSeconds - actor::LastRenderTime(owner);
+                const float ownerDist = actor::DistanceFromPlayer(owner);
+                if (a->hasClassBit(CLS_Decal) && ownerUnseen > 1.0f && ownerDist > 800.0f) {
+                    return true;
+                }
+                if (a->hasClassBit(CLS_Inventory) && actor::Physics(a) == PHYS_None
+                    && ownerUnseen > 1.0f && ownerDist > 600.0f
+                    && (!owner->hasClassBit(CLS_Pawn) || pawn::Enemy(owner) == nullptr)
+                    && (!a->stateFrame || a->stateFrame->latentAction == 0)) {
+                    const float tr = actor::TimerRate(a);
+                    if (tr <= 0.0f) {
+                        return true;
+                    }
+                    float& tc = actor::TimerCounter(a);
+                    if (tc + deltaSeconds < tr) {
+                        tc += deltaSeconds;
+                        return true;
+                    }
+                }
+                if (actor::bHidden(a) && actor::Physics(a) == PHYS_None && actor::TimerRate(a) <= 0.0f
+                    && (!a->stateFrame || a->stateFrame->latentAction == 0)
+                    && ownerUnseen > 1.5f && ownerDist > 900.0f) {
+                    return true;
+                }
+            } else if (!owner && a->hasClassBit(CLS_Inventory)
+                && actor::Physics(a) == PHYS_None
+                && (!a->stateFrame || a->stateFrame->latentAction == 0)
+                && (timeSeconds - actor::LastRenderTime(a)) > 3.0f && actor::DistanceFromPlayer(a) > 1000.0f) {
+                const float tr = actor::TimerRate(a);
+                if (tr <= 0.0f) {
+                    return true;
+                }
+                float& tc = actor::TimerCounter(a);
+                if (tc + deltaSeconds < tr) {
+                    tc += deltaSeconds;
+                    return true;
+                }
+            } else if (a->hasClassBit(CLS_ScriptedPawn)
+                && pawn::Enemy(a) == nullptr && actor::Physics(a) == PHYS_Walking
+                && (timeSeconds - actor::LastRenderTime(a)) > 3.0f && actor::DistanceFromPlayer(a) > 1500.0f) {
+                if (((frame + a->handle) & 1u) != 0) {
+                    return true;
+                }
+                deltaSeconds = std::min(deltaSeconds * 2.0f, 0.12f);
+            }
+        }
+#endif
 
         if (actor::Mesh(a)) {
             updateAnimation(a, deltaSeconds);

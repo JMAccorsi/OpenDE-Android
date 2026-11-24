@@ -41,10 +41,18 @@ namespace dx {
         bool upload(UTexture* texture, GLTextureInfo& info, bool masked);
         bool uploadReplacement(UTexture* texture, GLTextureInfo& info);
 
+        struct ProceduralRing {
+            uint32_t ids[3] = {};
+            uint32_t width = 0;
+            uint32_t height = 0;
+            uint8_t nextSlot = 0;
+        };
+
         std::unordered_map<UTexture*, GLTextureInfo> textures;
         std::unordered_map<UTexture*, GLTextureInfo> maskedTextures;
         std::unordered_map<UTexture*, TextureAnimation> animations;
         std::unordered_map<UTexture*, uint64_t> proceduralFrames;
+        std::unordered_map<UTexture*, ProceduralRing> proceduralRings;
         std::vector<uint8_t> proceduralRgba;
         ProceduralTextures procedural;
         TextureReplacements replacements;

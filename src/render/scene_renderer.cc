@@ -15,6 +15,11 @@
 #include <limits>
 #include <map>
 #include <set>
+#ifdef __ANDROID__
+#include <SDL3/SDL_log.h>
+#include <cstdio>
+#include <sched.h>
+#endif
 
 namespace dx {
     namespace {
@@ -241,9 +246,82 @@ namespace dx {
         return drawType == DT_Sprite || drawType == DT_SpriteAnimOnce;
     }
 
+#ifdef __ANDROID__
+        void pinThreadToBigCores(const char* label)
+        {
+            static std::once_flag initOnce;
+            static cpu_set_t bigMask;
+            static uint32_t maskBits = 0;
+            static int bigCount = 0;
+            std::call_once(initOnce, []() {
+                CPU_ZERO(&bigMask);
+                long freqs[32] = {};
+                int cpuCount = 0;
+                long maxFreq = 0;
+                for (int cpu = 0; cpu < 32; cpu++) {
+                    char path[96];
+                    std::snprintf(path, sizeof(path), "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+                    std::FILE* f = std::fopen(path, "rb");
+                    if (!f) {
+                        continue;
+                    }
+                    long freq = 0;
+                    if (std::fscanf(f, "%ld", &freq) == 1 && freq > 0) {
+                        freqs[cpu] = freq;
+                        cpuCount++;
+                        if (freq > maxFreq) {
+                            maxFreq = freq;
+                        }
+                    }
+                    std::fclose(f);
+                }
+                if (maxFreq > 0 && cpuCount > 2) {
+                    long threshold = maxFreq * 95 / 100;
+                    for (int cpu = 0; cpu < 32; cpu++) {
+                        if (freqs[cpu] >= threshold) {
+                            CPU_SET(cpu, &bigMask);
+                            maskBits |= (1u << static_cast<unsigned>(cpu));
+                            bigCount++;
+                        }
+                    }
+                    if (bigCount < 2) {
+                        long secondFreq = 0;
+                        for (int cpu = 0; cpu < 32; cpu++) {
+                            if (freqs[cpu] > secondFreq && freqs[cpu] < threshold) {
+                                secondFreq = freqs[cpu];
+                            }
+                        }
+                        if (secondFreq > 0) {
+                            long threshold2 = secondFreq * 95 / 100;
+                            for (int cpu = 0; cpu < 32; cpu++) {
+                                if (freqs[cpu] >= threshold2 && !CPU_ISSET(cpu, &bigMask)) {
+                                    CPU_SET(cpu, &bigMask);
+                                    maskBits |= (1u << static_cast<unsigned>(cpu));
+                                    bigCount++;
+                                }
+                            }
+                        }
+                    }
+                    if (bigCount >= cpuCount) {
+                        bigCount = 0;
+                        maskBits = 0;
+                    }
+                }
+                SDL_Log("OpenDE_Affinity: detected cpuCount=%d maxFreq=%ld bigCount=%d mask=0x%x", cpuCount, maxFreq, bigCount, maskBits);
+            });
+            if (bigCount >= 2) {
+                int rc = sched_setaffinity(0, sizeof(bigMask), &bigMask);
+                SDL_Log("OpenDE_Affinity: pin %s mask=0x%x rc=%d", label, maskBits, rc);
+            }
+        }
+#endif
+
     SceneRenderer::Worker::Worker()
     {
         thread = std::thread([this]() {
+#ifdef __ANDROID__
+            pinThreadToBigCores("worker");
+#endif
             std::unique_lock<std::mutex> lock(mutex);
             while (true) {
                 cv.wait(lock, [this]() { return stop || busy; });
@@ -292,6 +370,9 @@ namespace dx {
         : device(std::make_unique<GLRenderDevice>())
         , lightmaps(*device)
     {
+#ifdef __ANDROID__
+        pinThreadToBigCores("main");
+#endif
         startTime = static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now().time_since_epoch()).count()) / 1e6;
     }
 
@@ -593,9 +674,10 @@ namespace dx {
         int32_t spanWidth = viewportWidth;
         int32_t spanHeight = viewportHeight;
 #ifdef __ANDROID__
-        while (spanHeight > 240 && spanWidth > 320) {
-            spanWidth = (spanWidth + 1) / 2;
-            spanHeight = (spanHeight + 1) / 2;
+        if (spanWidth > 256 || spanHeight > 128) {
+            float scale = std::min(256.0f / static_cast<float>(spanWidth), 128.0f / static_cast<float>(spanHeight));
+            spanWidth = std::max(64, static_cast<int32_t>(std::round(static_cast<float>(spanWidth) * scale)));
+            spanHeight = std::max(48, static_cast<int32_t>(std::round(static_cast<float>(spanHeight) * scale)));
         }
 #endif
         if (open) {
@@ -627,18 +709,20 @@ namespace dx {
         auto distance = [](const Plane& plane, const Vector& point) {
             return plane.x * point.x + plane.y * point.y + plane.z * point.z + plane.w;
         };
+        const Vector scaledY = axes.yAxis * scaleX;
+        const Vector scaledZ = axes.zAxis * scaleY;
         auto project = [&](const Vector& point) {
             Vector delta = point - eye;
-            float forward = delta.dot(axes.xAxis);
-            return ScreenPoint { halfWidth + delta.dot(axes.yAxis) / forward * scaleX, halfHeight - delta.dot(axes.zAxis) / forward * scaleY };
+            const float invF = 1.0f / delta.dot(axes.xAxis);
+            return ScreenPoint { halfWidth + delta.dot(scaledY) * invF, halfHeight - delta.dot(scaledZ) * invF };
         };
         auto boxVisible = [&](const BoundingBox& box, uint32_t& planeMask) {
             uint32_t mask = planeMask;
-            for (int32_t p = 0; mask != 0 && p < planeCount; p++) {
+            uint32_t iter = mask;
+            while (iter != 0) {
+                const int32_t p = std::countr_zero(iter);
                 const uint32_t bit = 1u << static_cast<uint32_t>(p);
-                if (!(mask & bit)) {
-                    continue;
-                }
+                iter &= iter - 1;
                 const Plane& plane = planes[static_cast<size_t>(p)];
                 const float px = plane.x >= 0 ? box.max.x : box.min.x;
                 const float py = plane.y >= 0 ? box.max.y : box.min.y;
@@ -654,47 +738,60 @@ namespace dx {
                 }
             }
             planeMask = mask;
-            const Vector nVertex = {
-                axes.xAxis.x >= 0 ? box.min.x : box.max.x,
-                axes.xAxis.y >= 0 ? box.min.y : box.max.y,
-                axes.xAxis.z >= 0 ? box.min.z : box.max.z,
-            };
-            if ((nVertex - eye).dot(axes.xAxis) < sceneNearPlane) {
+            if (!spans.hasCoverage()) {
+                return true;
+            }
+            const float dx0 = box.min.x - eye.x;
+            const float dx1 = box.max.x - eye.x;
+            const float dy0 = box.min.y - eye.y;
+            const float dy1 = box.max.y - eye.y;
+            const float dz0 = box.min.z - eye.z;
+            const float dz1 = box.max.z - eye.z;
+            const float fx0 = dx0 * axes.xAxis.x;
+            const float fx1 = dx1 * axes.xAxis.x;
+            const float fy0 = dy0 * axes.xAxis.y;
+            const float fy1 = dy1 * axes.xAxis.y;
+            const float fz0 = dz0 * axes.xAxis.z;
+            const float fz1 = dz1 * axes.xAxis.z;
+            const float minF = std::min(fx0, fx1) + std::min(fy0, fy1) + std::min(fz0, fz1);
+            if (minF < sceneNearPlane) {
                 return spans.rectVisible(0, 0, spanWidth, spanHeight);
             }
-            float left = std::numeric_limits<float>::max();
-            float right = std::numeric_limits<float>::lowest();
-            float top = std::numeric_limits<float>::max();
-            float bottom = std::numeric_limits<float>::lowest();
-            const float fx[2] = { (box.min.x - eye.x) * axes.xAxis.x, (box.max.x - eye.x) * axes.xAxis.x };
-            const float fy[2] = { (box.min.y - eye.y) * axes.xAxis.y, (box.max.y - eye.y) * axes.xAxis.y };
-            const float fz[2] = { (box.min.z - eye.z) * axes.xAxis.z, (box.max.z - eye.z) * axes.xAxis.z };
-            const float rx[2] = { (box.min.x - eye.x) * axes.yAxis.x, (box.max.x - eye.x) * axes.yAxis.x };
-            const float ry[2] = { (box.min.y - eye.y) * axes.yAxis.y, (box.max.y - eye.y) * axes.yAxis.y };
-            const float rz[2] = { (box.min.z - eye.z) * axes.yAxis.z, (box.max.z - eye.z) * axes.yAxis.z };
-            const float ux[2] = { (box.min.x - eye.x) * axes.zAxis.x, (box.max.x - eye.x) * axes.zAxis.x };
-            const float uy[2] = { (box.min.y - eye.y) * axes.zAxis.y, (box.max.y - eye.y) * axes.zAxis.y };
-            const float uz[2] = { (box.min.z - eye.z) * axes.zAxis.z, (box.max.z - eye.z) * axes.zAxis.z };
-            for (int32_t c = 0; c < 8; c++) {
-                const int cx = c & 1;
-                const int cy = (c >> 1) & 1;
-                const int cz = (c >> 2) & 1;
-                const float invF = 1.0f / (fx[cx] + fy[cy] + fz[cz]);
-                const float px = halfWidth + (rx[cx] + ry[cy] + rz[cz]) * invF * scaleX;
-                const float py = halfHeight - (ux[cx] + uy[cy] + uz[cz]) * invF * scaleY;
-                left = std::min(left, px);
-                right = std::max(right, px);
-                top = std::min(top, py);
-                bottom = std::max(bottom, py);
-            }
-            left = std::clamp(left, -1.0f, static_cast<float>(spanWidth) + 1.0f);
-            right = std::clamp(right, -1.0f, static_cast<float>(spanWidth) + 1.0f);
-            top = std::clamp(top, -1.0f, static_cast<float>(spanHeight) + 1.0f);
-            bottom = std::clamp(bottom, -1.0f, static_cast<float>(spanHeight) + 1.0f);
+            const float maxF = std::max(fx0, fx1) + std::max(fy0, fy1) + std::max(fz0, fz1);
+            const float rx0 = dx0 * scaledY.x;
+            const float rx1 = dx1 * scaledY.x;
+            const float ry0 = dy0 * scaledY.y;
+            const float ry1 = dy1 * scaledY.y;
+            const float rz0 = dz0 * scaledY.z;
+            const float rz1 = dz1 * scaledY.z;
+            const float minR = std::min(rx0, rx1) + std::min(ry0, ry1) + std::min(rz0, rz1);
+            const float maxR = std::max(rx0, rx1) + std::max(ry0, ry1) + std::max(rz0, rz1);
+            const float ux0 = dx0 * scaledZ.x;
+            const float ux1 = dx1 * scaledZ.x;
+            const float uy0 = dy0 * scaledZ.y;
+            const float uy1 = dy1 * scaledZ.y;
+            const float uz0 = dz0 * scaledZ.z;
+            const float uz1 = dz1 * scaledZ.z;
+            const float minU = std::min(ux0, ux1) + std::min(uy0, uy1) + std::min(uz0, uz1);
+            const float maxU = std::max(ux0, ux1) + std::max(uy0, uy1) + std::max(uz0, uz1);
+            const float invMinF = 1.0f / minF;
+            const float invMaxF = 1.0f / maxF;
+            const float minRelX = minR < 0.0f ? minR * invMinF : minR * invMaxF;
+            const float maxRelX = maxR > 0.0f ? maxR * invMinF : maxR * invMaxF;
+            const float minRelY = minU < 0.0f ? minU * invMinF : minU * invMaxF;
+            const float maxRelY = maxU > 0.0f ? maxU * invMinF : maxU * invMaxF;
+            const float left = std::clamp(halfWidth + minRelX, -1.0f, static_cast<float>(spanWidth) + 1.0f);
+            const float right = std::clamp(halfWidth + maxRelX, -1.0f, static_cast<float>(spanWidth) + 1.0f);
+            const float top = std::clamp(halfHeight - maxRelY, -1.0f, static_cast<float>(spanHeight) + 1.0f);
+            const float bottom = std::clamp(halfHeight - minRelY, -1.0f, static_cast<float>(spanHeight) + 1.0f);
             return spans.rectVisible(static_cast<int32_t>(std::floor(left)) - 1, static_cast<int32_t>(std::floor(top)) - 1, static_cast<int32_t>(std::ceil(right)) + 1, static_cast<int32_t>(std::ceil(bottom)) + 1);
         };
         bool mirrorsActive = view.recursion < MaxFrameRecursion - 1;
-        const std::vector<BspNode>& nodes = model->nodes;
+        const OccNode* occNodes = levelData.occNodes.data();
+        const size_t nodeCount = levelData.occNodes.size();
+        const Vector* occPoints = levelData.occPoints.data();
+        const BoundingBox* nodeBounds = model->nodeBounds.data();
+        const size_t leafCount = model->leaves.size();
         int32_t sequence = 0;
         Vector clipA[64];
         Vector clipB[64];
@@ -704,36 +801,33 @@ namespace dx {
         pendingPoints.clear();
         pendingCounts.clear();
         auto processPolygon = [&](int32_t index, uint32_t planeMask) {
-            const BspNode& node = nodes[static_cast<size_t>(index)];
-            if (node.numVertices < 3 || node.surf < 0 || static_cast<size_t>(node.surf) >= levelData.surfFlags.size()) {
+            const OccNode& node = occNodes[static_cast<size_t>(index)];
+            if (node.polyCount < 3 || !(view.zoneMask & node.emitZoneMask)) {
                 return;
             }
-            uint32_t flags = levelData.surfFlags[static_cast<size_t>(node.surf)];
-            float side = node.plane.x * eye.x + node.plane.y * eye.y + node.plane.z * eye.z - node.plane.w;
-            bool twoSided = (flags & (PF_TwoSided | PF_Portal)) != 0;
+            const uint32_t flags = node.flags;
+            const float side = node.plane.x * eye.x + node.plane.y * eye.y + node.plane.z * eye.z - node.plane.w;
+            const bool twoSided = (flags & (PF_TwoSided | PF_Portal)) != 0;
             if (side < -1.0f && !twoSided) {
                 return;
             }
-            if (!(view.zoneMask & levelData.nodeEmitZoneMask[static_cast<size_t>(index)])) {
-                return;
-            }
-            Vector* input = clipA;
-            Vector* output = clipB;
-            int32_t count = std::min<int32_t>(node.numVertices, 32);
-            for (int32_t i = 0; i < count; i++) {
-                input[i] = model->points[static_cast<size_t>(model->verts[static_cast<size_t>(node.vertPool + i)].vertex)];
-            }
+            const bool backdrop = (flags & PF_FakeBackdrop) && levelData.hasBackdrop;
+            const Vector* polyVerts = occPoints + node.polyStart;
+            int32_t count = static_cast<int32_t>(node.polyCount);
             if (planeMask != 0) {
+                const Vector* src = polyVerts;
+                Vector* scratchDst = clipA;
+                Vector* scratchAlt = clipB;
                 float dists[64];
-                for (int32_t p = 0; p < planeCount && count >= 3; p++) {
-                    if (!(planeMask & (1u << static_cast<uint32_t>(p)))) {
-                        continue;
-                    }
+                uint32_t iter = planeMask;
+                while (iter != 0 && count >= 3) {
+                    const int32_t p = std::countr_zero(iter);
+                    iter &= iter - 1;
                     const Plane& plane = planes[static_cast<size_t>(p)];
                     bool allIn = true;
                     bool anyIn = false;
                     for (int32_t i = 0; i < count; i++) {
-                        float d = distance(plane, input[i]);
+                        float d = distance(plane, src[i]);
                         dists[i] = d;
                         if (d >= 0) {
                             anyIn = true;
@@ -750,29 +844,30 @@ namespace dx {
                     int32_t produced = 0;
                     for (int32_t i = 0; i < count; i++) {
                         int32_t nextIdx = (i + 1 < count) ? (i + 1) : 0;
-                        const Vector& a = input[i];
-                        const Vector& b = input[nextIdx];
+                        const Vector& a = src[i];
+                        const Vector& b = src[nextIdx];
                         float da = dists[i];
                         float db = dists[nextIdx];
                         if (da >= 0) {
-                            output[produced++] = a;
+                            scratchDst[produced++] = a;
                         }
                         if ((da >= 0) != (db >= 0) && produced < 63) {
-                            output[produced++] = a + (b - a) * (da / (da - db));
+                            scratchDst[produced++] = a + (b - a) * (da / (da - db));
                         }
                     }
-                    std::swap(input, output);
+                    src = scratchDst;
+                    std::swap(scratchDst, scratchAlt);
                     count = produced;
                 }
-            }
-            if (count < 3) {
-                return;
+                if (count < 3) {
+                    return;
+                }
+                polyVerts = src;
             }
             for (int32_t i = 0; i < count; i++) {
-                screen[i] = project(input[i]);
+                screen[i] = project(polyVerts[i]);
             }
-            int32_t mirror = mirrorsActive && (flags & PF_Mirrored) ? levelData.nodeMirror[static_cast<size_t>(index)] : -1;
-            bool backdrop = (flags & PF_FakeBackdrop) && levelData.hasBackdrop;
+            const int32_t mirror = mirrorsActive && (flags & PF_Mirrored) ? static_cast<int32_t>(node.mirror) : -1;
             scratchSpans.clear();
             if (!spans.polygonVisible(screen, count, (mirror >= 0 || backdrop) ? &scratchSpans : nullptr)) {
                 return;
@@ -785,14 +880,14 @@ namespace dx {
             } else if (backdrop) {
                 visibility->backdropSpans.insert(visibility->backdropSpans.end(), scratchSpans.begin(), scratchSpans.end());
             }
-            bool occluder = mirror >= 0 || backdrop || !(flags & (PF_Masked | PF_Translucent | PF_Modulated | PF_Invisible | PF_Portal));
+            const bool occluder = mirror >= 0 || backdrop || !(flags & (PF_Masked | PF_Translucent | PF_Modulated | PF_Invisible | PF_Portal));
             if (occluder && (side > 0 || twoSided)) {
                 pendingCounts.push_back(count);
                 pendingPoints.insert(pendingPoints.end(), screen, screen + count);
             }
         };
         auto visitLeaf = [&](int32_t leaf) {
-            if (leaf >= 0 && static_cast<size_t>(leaf) < model->leaves.size()) {
+            if (leaf >= 0 && static_cast<size_t>(leaf) < leafCount) {
                 visibility->leaves.emplace_back(leaf, sequence);
             }
             sequence++;
@@ -800,25 +895,26 @@ namespace dx {
         const uint32_t fullPlaneMask = (1u << static_cast<uint32_t>(planeCount)) - 1u;
         std::vector<OccStackEntry>& stack = scratchOccStack;
         stack.clear();
-        stack.push_back({ 0, 0, fullPlaneMask });
+        stack.push_back({ 0, 0, fullPlaneMask, 0, -1 });
         while (!stack.empty() && !spans.full()) {
             const OccStackEntry entry = stack.back();
             stack.pop_back();
             const int32_t index = entry.index;
-            const int32_t stage = entry.stage;
             uint32_t planeMask = entry.planeMask;
-            const BspNode& node = nodes[static_cast<size_t>(index)];
-            bool front = node.plane.x * eye.x + node.plane.y * eye.y + node.plane.z * eye.z - node.plane.w > 0;
-            if (stage == 0) {
-                bool zoneHidden = view.zoneMask != ~0ull && node.zoneMask && !(node.zoneMask & view.zoneMask);
-                if (zoneHidden || (node.renderBound >= 0 && static_cast<size_t>(node.renderBound) < model->nodeBounds.size() && model->nodeBounds[static_cast<size_t>(node.renderBound)].valid && !boxVisible(model->nodeBounds[static_cast<size_t>(node.renderBound)], planeMask))) {
+            if (entry.stage == 0) {
+                const OccNode& node = occNodes[static_cast<size_t>(index)];
+                const bool zoneHidden = view.zoneMask != ~0ull && node.zoneMask && !(node.zoneMask & view.zoneMask);
+                if (zoneHidden || (node.renderBound >= 0 && !boxVisible(nodeBounds[static_cast<size_t>(node.renderBound)], planeMask))) {
                     visibility->culled.emplace_back(index, sequence++);
                     continue;
                 }
-                stack.push_back({ index, 1, planeMask });
-                int32_t nearChild = front ? node.front : node.back;
+                const bool front = node.plane.x * eye.x + node.plane.y * eye.y + node.plane.z * eye.z - node.plane.w > 0;
+                const int32_t nearChild = front ? node.front : node.back;
+                const int32_t farChild = front ? node.back : node.front;
+                const int32_t farLeaf = node.leaf[front ? 0 : 1];
+                stack.push_back({ index, 1, planeMask, farChild, farLeaf });
                 if (nearChild > 0) {
-                    stack.push_back({ nearChild, 0, planeMask });
+                    stack.push_back({ nearChild, 0, planeMask, 0, -1 });
                 } else {
                     visitLeaf(node.leaf[front ? 1 : 0]);
                 }
@@ -826,9 +922,9 @@ namespace dx {
             }
             pendingPoints.clear();
             pendingCounts.clear();
-            for (int32_t plane = index; plane >= 0 && static_cast<size_t>(plane) < nodes.size();) {
+            for (int32_t plane = index; plane >= 0 && static_cast<size_t>(plane) < nodeCount;) {
                 processPolygon(plane, planeMask);
-                int32_t next = nodes[static_cast<size_t>(plane)].iPlane;
+                const int32_t next = occNodes[static_cast<size_t>(plane)].iPlane;
                 if (next == plane) {
                     break;
                 }
@@ -839,11 +935,10 @@ namespace dx {
                 spans.occlude(pendingPoints.data() + offset, count);
                 offset += static_cast<size_t>(count);
             }
-            int32_t farChild = front ? node.back : node.front;
-            if (farChild > 0) {
-                stack.push_back({ farChild, 0, planeMask });
+            if (entry.farChild > 0) {
+                stack.push_back({ entry.farChild, 0, planeMask, 0, -1 });
             } else {
-                visitLeaf(node.leaf[front ? 0 : 1]);
+                visitLeaf(entry.farLeaf);
             }
         }
         visibility->endSequence = sequence;
@@ -1039,6 +1134,7 @@ namespace dx {
             uint32_t flags;
             int32_t page;
             uint8_t zone;
+            bool reversed;
 
             bool operator<(const Key& o) const
             {
@@ -1051,7 +1147,10 @@ namespace dx {
                 if (page != o.page) {
                     return page < o.page;
                 }
-                return zone < o.zone;
+                if (zone != o.zone) {
+                    return zone < o.zone;
+                }
+                return reversed < o.reversed;
             }
         };
 
@@ -1127,9 +1226,7 @@ namespace dx {
                     vertex.x = point.x;
                     vertex.y = point.y;
                     vertex.z = point.z;
-                    vertex.nx = surfaceNormal.x;
-                    vertex.ny = surfaceNormal.y;
-                    vertex.nz = surfaceNormal.z;
+                    vertex.setNormal(surfaceNormal.x, surfaceNormal.y, surfaceNormal.z);
                     vertex.u = ((point - base).dot(axisU) + static_cast<float>(surf.panU)) / (texWidth * drawScale);
                     vertex.v = ((point - base).dot(axisV) + static_cast<float>(surf.panV)) / (texHeight * drawScale);
                     if (!unlit) {
@@ -1139,9 +1236,7 @@ namespace dx {
                         } else {
                             const Vector& zoneLight = sideAmbient;
                             Vector ambient = Vector { std::floor(zoneLight.x * 64.0f), std::floor(zoneLight.y * 64.0f), std::floor(zoneLight.z * 64.0f) } * (2.0f / 127.5f);
-                            vertex.r = std::min(ambient.x, 1.0f);
-                            vertex.g = std::min(ambient.y, 1.0f);
-                            vertex.b = std::min(ambient.z, 1.0f);
+                            vertex.setColor(ambient.x, ambient.y, ambient.z);
                         }
                     }
                     polygon.push_back(vertex);
@@ -1149,7 +1244,7 @@ namespace dx {
                 if (reversed) {
                     std::reverse(polygon.begin(), polygon.end());
                 }
-                Key key { texture, (surf.polyFlags | textureFlags(texture)) & flagMask, page, zone };
+                Key key { texture, (surf.polyFlags | textureFlags(texture)) & flagMask, page, zone, reversed };
                 if ((surf.polyFlags & PF_Mirrored) && !reversed) {
                     float planeDistance = surfaceNormal.dot(base);
                     MirrorKey mirrorKey {
@@ -1220,6 +1315,7 @@ namespace dx {
             batch.polyFlags = key.flags;
             batch.lightmapPage = key.page;
             batch.zone = key.zone;
+            batch.reversed = key.reversed;
             auto isFogZone = [&](int32_t zone) {
                 UObject* zoneObject = zoneActor(static_cast<uint8_t>(zone));
                 return zoneObject && zoneObject->data && zoneObject->hasClassBit(CLS_ZoneInfo) && zoneinfo::bFogZone(zoneObject);
@@ -1319,6 +1415,7 @@ namespace dx {
             }
         }
         levelData.nodeStamp.assign(model->nodes.size(), 0);
+        levelData.transNodeStamp.assign(model->nodes.size(), 0);
         levelData.surfStamp.assign(model->surfs.size(), 0);
         levelData.leafStamp.assign(model->leaves.size(), 0);
         levelData.nodeVolumetrics.assign(model->nodes.size(), 0);
@@ -1380,6 +1477,32 @@ namespace dx {
         }
         if (!mirrorVertices.empty()) {
             levelData.mirrorVao = device->createStatic(mirrorVertices);
+        }
+        levelData.occNodes.resize(model->nodes.size());
+        levelData.occPoints.clear();
+        levelData.occPoints.reserve(model->verts.size());
+        for (size_t i = 0; i < model->nodes.size(); i++) {
+            const BspNode& src = model->nodes[i];
+            OccNode& dst = levelData.occNodes[i];
+            dst.plane = src.plane;
+            dst.zoneMask = src.zoneMask;
+            dst.emitZoneMask = levelData.nodeEmitZoneMask[i];
+            dst.front = src.front;
+            dst.back = src.back;
+            dst.iPlane = src.iPlane;
+            dst.leaf[0] = src.leaf[0];
+            dst.leaf[1] = src.leaf[1];
+            dst.renderBound = (src.renderBound >= 0 && static_cast<size_t>(src.renderBound) < model->nodeBounds.size() && model->nodeBounds[static_cast<size_t>(src.renderBound)].valid) ? src.renderBound : -1;
+            dst.flags = (src.surf >= 0 && static_cast<size_t>(src.surf) < levelData.surfFlags.size()) ? levelData.surfFlags[static_cast<size_t>(src.surf)] : 0u;
+            dst.mirror = static_cast<int16_t>(levelData.nodeMirror[i]);
+            if (src.numVertices >= 3 && src.surf >= 0 && static_cast<size_t>(src.surf) < levelData.surfFlags.size() && dst.emitZoneMask != 0) {
+                const int32_t cnt = std::min<int32_t>(src.numVertices, 32);
+                dst.polyStart = static_cast<int32_t>(levelData.occPoints.size());
+                dst.polyCount = static_cast<uint16_t>(cnt);
+                for (int32_t v = 0; v < cnt; v++) {
+                    levelData.occPoints.push_back(model->points[static_cast<size_t>(model->verts[static_cast<size_t>(src.vertPool + v)].vertex)]);
+                }
+            }
         }
     }
 
@@ -1446,12 +1569,24 @@ namespace dx {
                     continue;
                 }
                 std::sort(ranges.begin(), ranges.end());
+                const bool singleSided = (batch.polyFlags & PF_TwoSided) == 0;
+                const std::vector<BspNode>& bspNodes = levelData.model->nodes;
                 for (const auto& [first, count, node] : ranges) {
+                    if (singleSided) {
+                        const BspNode& bspNode = bspNodes[static_cast<size_t>(node)];
+                        const float side = bspNode.plane.x * view.location.x + bspNode.plane.y * view.location.y + bspNode.plane.z * view.location.z - bspNode.plane.w;
+                        if ((!batch.reversed && side < -1.0f) || (batch.reversed && side > 1.0f)) {
+                            continue;
+                        }
+                    }
                     surfaces.push_back({ nodeOrder[static_cast<size_t>(node)], &batch, first, count, node });
                 }
             }
             std::stable_sort(surfaces.begin(), surfaces.end(), [](const TranslucentSurface& a, const TranslucentSurface& b) {
-                return a.order < b.order;
+                if (a.order != b.order) {
+                    return a.order < b.order;
+                }
+                return a.batch < b.batch;
             });
             return;
         }
@@ -1488,6 +1623,86 @@ namespace dx {
             }
             device->setColorWrite(true);
         }
+#ifdef __ANDROID__
+        const bool flatMode = renderMode == RenderMode::ZonePortal || renderMode == RenderMode::BspCuts;
+        scratchPreparedBatches.clear();
+        scratchAllFirsts.clear();
+        scratchAllCounts.clear();
+        size_t totalPrebakedIndices = 0;
+        for (int32_t index : touchedBatches) {
+            const Batch& batch = levelData.batches[static_cast<size_t>(index)];
+            if (isTranslucentFlags(batch.polyFlags) || !(view.zoneMask & (1ull << (batch.zone & 63)))) {
+                continue;
+            }
+            if (mirrorsActive && (batch.polyFlags & PF_Mirrored)) {
+                continue;
+            }
+            std::vector<std::array<int32_t, 3>>& ranges = levelData.batchRanges[static_cast<size_t>(index)];
+            std::sort(ranges.begin(), ranges.end());
+            const int32_t rangeStart = static_cast<int32_t>(scratchAllFirsts.size());
+            for (const auto& [first, count, node] : ranges) {
+                if (static_cast<int32_t>(scratchAllFirsts.size()) > rangeStart && scratchAllFirsts.back() + scratchAllCounts.back() == first) {
+                    scratchAllCounts.back() += count;
+                } else {
+                    scratchAllFirsts.push_back(first);
+                    scratchAllCounts.push_back(count);
+                }
+            }
+            const int32_t rangeCount = static_cast<int32_t>(scratchAllFirsts.size()) - rangeStart;
+            if (rangeCount <= 0) {
+                continue;
+            }
+            int32_t batchVerts = 0;
+            if (!flatMode && rangeCount > 1) {
+                for (int32_t r = 0; r < rangeCount; r++) {
+                    const int32_t cnt = scratchAllCounts[static_cast<size_t>(rangeStart + r)];
+                    if (cnt > 0) {
+                        batchVerts += cnt;
+                    }
+                }
+                totalPrebakedIndices += static_cast<size_t>(batchVerts);
+            }
+            scratchPreparedBatches.push_back({ index, rangeStart, rangeCount, 0, batchVerts });
+        }
+        bool prebakedReady = false;
+        if (!flatMode && totalPrebakedIndices > 0) {
+            size_t baseByteOffset = 0;
+            uint32_t* mapped = device->beginStaticIndexUpload(levelData.vao, totalPrebakedIndices, baseByteOffset);
+            if (mapped) {
+                size_t cursor = 0;
+                for (PreparedBatch& p : scratchPreparedBatches) {
+                    if (p.indexCount <= 0) {
+                        continue;
+                    }
+                    p.indexByteOffset = baseByteOffset + cursor * sizeof(uint32_t);
+                    uint32_t* dst = mapped + cursor;
+                    for (int32_t r = 0; r < p.rangeCount; r++) {
+                        const uint32_t base = static_cast<uint32_t>(scratchAllFirsts[static_cast<size_t>(p.rangeStart + r)]);
+                        const int32_t cnt = scratchAllCounts[static_cast<size_t>(p.rangeStart + r)];
+                        for (int32_t j = 0; j < cnt; j++) {
+                            *dst++ = base + static_cast<uint32_t>(j);
+                        }
+                    }
+                    cursor += static_cast<size_t>(p.indexCount);
+                }
+                device->endStaticIndexUpload();
+                prebakedReady = true;
+            }
+        }
+        for (const PreparedBatch& p : scratchPreparedBatches) {
+            const Batch& batch = levelData.batches[static_cast<size_t>(p.batchIndex)];
+            drawBatch(
+                batch,
+                view,
+                scratchAllFirsts.data() + p.rangeStart,
+                scratchAllCounts.data() + p.rangeStart,
+                p.rangeCount,
+                -1,
+                uploadedLights,
+                prebakedReady ? p.indexByteOffset : 0,
+                prebakedReady ? p.indexCount : 0);
+        }
+#else
         for (int32_t index : touchedBatches) {
             const Batch& batch = levelData.batches[static_cast<size_t>(index)];
             if (isTranslucentFlags(batch.polyFlags) || !(view.zoneMask & (1ull << (batch.zone & 63)))) {
@@ -1499,6 +1714,7 @@ namespace dx {
             collectRanges(index);
             drawBatch(batch, view, scratchFirsts.data(), scratchCounts.data(), static_cast<int32_t>(scratchFirsts.size()), -1, uploadedLights);
         }
+#endif
         device->setPan(0, 0);
         device->setScale(1, 1);
         if (renderMode == RenderMode::Textured) {
@@ -1530,7 +1746,7 @@ namespace dx {
         device->setBlend(BlendMode::Opaque);
     }
 
-    void SceneRenderer::drawBatch(const Batch& batch, const View& view, const int32_t* firsts, const int32_t* counts, int32_t ranges, int32_t onlyNode, uint32_t& uploadedLights)
+    void SceneRenderer::drawBatch(const Batch& batch, const View& view, const int32_t* firsts, const int32_t* counts, int32_t ranges, int32_t onlyNode, uint32_t& uploadedLights, size_t prebakedByteOffset, int32_t prebakedCount)
     {
         bool backdropMask = (batch.polyFlags & PF_FakeBackdrop) && levelData.hasBackdrop;
         UTexture* matrix = matrixTexture(World::current ? World::current->player() : nullptr);
@@ -1589,15 +1805,22 @@ namespace dx {
         device->setScale(batch.uSize / uSize, batch.vSize / vSize);
         device->setPan(panU / uSize, panV / vSize);
         device->bindTexture(textureId);
+        auto emitDraw = [&]() {
+            if (prebakedCount > 0 && !flat) {
+                device->drawStaticIndexed(geometry, prebakedByteOffset, prebakedCount);
+            } else {
+                device->drawStaticRanges(geometry, firsts, counts, ranges);
+            }
+        };
         if (backdropMask) {
             device->setBlend(BlendMode::Opaque);
             device->setFlags(0);
             device->setColorWrite(false);
-            device->drawStaticRanges(geometry, firsts, counts, ranges);
+            emitDraw();
             device->setColorWrite(true);
             return;
         }
-        device->drawStaticRanges(geometry, firsts, counts, ranges);
+        emitDraw();
         device->setScale(1, 1);
         if (onlyNode >= 0 && renderMode == RenderMode::Textured) {
             drawFog(batch, view, onlyNode);
@@ -1633,6 +1856,7 @@ namespace dx {
         if (asyncCandidates) {
             worker.wait();
         }
+        float t1w = nowMs();
         drawActors(actors, view, viewActor, occlude, asyncCandidates);
         float t2 = nowMs();
         drawLevelGeometry(view, true);
@@ -1642,6 +1866,8 @@ namespace dx {
         if (view.recursion == 0) {
             frameStats.bspMs = (t1 - t0) + (t3 - t2);
             frameStats.actorsMs = (t2 - t1) + (t4 - t3);
+            frameStats.actWaitMs = t1w - t1;
+            frameStats.actTransMs = t4 - t3;
         }
         if (view.clipCount) {
             View plain;
@@ -1711,11 +1937,12 @@ namespace dx {
         device->setDepthFunc(DepthFunc::LessEqual);
     }
 
-    void SceneRenderer::drawMirrors(const View& view, const std::vector<UObject*>& actors)
+    bool SceneRenderer::drawMirrors(const View& view, const std::vector<UObject*>& actors)
     {
         if (view.recursion >= MaxFrameRecursion - 1 || !levelData.mirrorVao) {
-            return;
+            return false;
         }
+        bool drewAny = false;
         for (size_t mirrorIndex = 0; mirrorIndex < levelData.mirrors.size(); mirrorIndex++) {
             const MirrorSurface& mirror = levelData.mirrors[mirrorIndex];
             const std::vector<ScreenSpan>& open = view.visibility->mirrorSpans[mirrorIndex];
@@ -1789,7 +2016,9 @@ namespace dx {
             }
             markMirror(view, mirror);
             drawFrameContent(child, actors, nullptr, false);
+            drewAny = true;
         }
+        return drewAny;
     }
 
     void SceneRenderer::collectVolumetrics(const View& view)
@@ -2001,7 +2230,7 @@ namespace dx {
         scratchFirsts.clear();
         scratchCounts.clear();
         for (const auto& [first, count, surfIndex, backFog, frontFog, node] : batch.surfPolys) {
-            if ((onlyNode >= 0 && node != onlyNode) || levelData.nodeStamp[static_cast<size_t>(node)] != visibleStamp) {
+            if ((onlyNode >= 0 && node != onlyNode) || (onlyNode == -2 && levelData.transNodeStamp[static_cast<size_t>(node)] != transStamp) || levelData.nodeStamp[static_cast<size_t>(node)] != visibleStamp) {
                 continue;
             }
             const BspSurf& surf = levelData.model->surfs[static_cast<size_t>(surfIndex)];
@@ -2047,7 +2276,7 @@ namespace dx {
         scratchFirsts.clear();
         scratchCounts.clear();
         for (const auto& [first, count, surfIndex, node] : batch.detailPolys) {
-            if ((onlyNode >= 0 && node != onlyNode) || levelData.nodeStamp[static_cast<size_t>(node)] != visibleStamp) {
+            if ((onlyNode >= 0 && node != onlyNode) || (onlyNode == -2 && levelData.transNodeStamp[static_cast<size_t>(node)] != transStamp) || levelData.nodeStamp[static_cast<size_t>(node)] != visibleStamp) {
                 continue;
             }
             if (batch.fogZone && view.fog && static_cast<size_t>(surfIndex) < levelData.fogFrame.size() && levelData.fogFrame[static_cast<size_t>(surfIndex)] == fogStamp && levelData.fogged[static_cast<size_t>(surfIndex)]) {
@@ -2502,8 +2731,8 @@ namespace dx {
     {
         UModel* model = levelData.model;
         Vector location = actor::Location(actor);
-        currentOrder = fallbackOrder;
         currentDistance = (location - view.location).size();
+        currentOrder = fallbackOrder;
         if (knownLeaf >= 0 && static_cast<size_t>(knownLeaf) < leafOrder.size() && levelData.leafStamp[static_cast<size_t>(knownLeaf)] == visibleStamp) {
             currentOrder = leafOrder[static_cast<size_t>(knownLeaf)];
             return;
@@ -2556,11 +2785,48 @@ namespace dx {
         size_t nextSurface = 0;
         uint32_t uploadedLights = ~0u;
         bool hasState = false;
+        float surfMs = 0.0f;
+        int surfCalls = 0;
         auto drawSurfacesBefore = [&](int32_t limit) {
+            const float ts0 = view.recursion == 0 ? profNowMs() : 0.0f;
             bool drew = false;
             while (nextSurface < surfaces.size() && surfaces[nextSurface].order <= limit) {
-                const TranslucentSurface& surface = surfaces[nextSurface++];
-                drawBatch(*surface.batch, view, &surface.first, &surface.count, 1, surface.node, uploadedLights);
+                const Batch* batch = surfaces[nextSurface].batch;
+                size_t runStart = nextSurface;
+                scratchFirsts.clear();
+                scratchCounts.clear();
+                while (nextSurface < surfaces.size() && surfaces[nextSurface].order <= limit && surfaces[nextSurface].batch == batch) {
+                    const TranslucentSurface& s = surfaces[nextSurface++];
+                    if (!scratchFirsts.empty() && scratchFirsts.back() + scratchCounts.back() == s.first) {
+                        scratchCounts.back() += s.count;
+                    } else {
+                        scratchFirsts.push_back(s.first);
+                        scratchCounts.push_back(s.count);
+                    }
+                }
+                const size_t runCount = nextSurface - runStart;
+                surfCalls++;
+                if (runCount == 1) {
+                    drawBatch(*batch, view, scratchFirsts.data(), scratchCounts.data(), 1, surfaces[runStart].node, uploadedLights);
+                } else {
+                    drawBatch(*batch, view, scratchFirsts.data(), scratchCounts.data(), static_cast<int32_t>(scratchFirsts.size()), -1, uploadedLights);
+                    if (renderMode == RenderMode::Textured) {
+                        const bool needFog = view.fog && batch->fogZone && !volumetrics.empty() && batch->lightmapPage >= 0;
+                        const bool needDetail = batch->detail && !batch->detailPolys.empty() && levelData.detailVao;
+                        if (needFog || needDetail) {
+                            transStamp++;
+                            for (size_t k = runStart; k < nextSurface; ++k) {
+                                levelData.transNodeStamp[static_cast<size_t>(surfaces[k].node)] = transStamp;
+                            }
+                            if (needFog) {
+                                drawFog(*batch, view, -2);
+                            }
+                            if (needDetail) {
+                                drawDetail(*batch, view, -2);
+                            }
+                        }
+                    }
+                }
                 drew = true;
             }
             if (drew) {
@@ -2569,10 +2835,20 @@ namespace dx {
                 device->setOcclusionSource(OcclusionSource::Mesh);
                 hasState = false;
             }
+            if (view.recursion == 0) {
+                surfMs += profNowMs() - ts0;
+            }
         };
 
+        if (view.recursion == 0) {
+            frameStats.transSurfaces = static_cast<int>(surfaces.size());
+        }
         if (translucentCount == 0) {
             drawSurfacesBefore(std::numeric_limits<int32_t>::max());
+            if (view.recursion == 0) {
+                frameStats.transSurfMs = surfMs;
+                frameStats.transSurfCalls = surfCalls;
+            }
             surfaces.clear();
             device->setBlend(BlendMode::Opaque);
             return;
@@ -2620,9 +2896,18 @@ namespace dx {
             const int32_t first = static_cast<int32_t>(totalVerts);
             const int32_t count = static_cast<int32_t>(item.vertices.size());
             totalVerts += item.vertices.size();
-            if (!draws.empty() && surfaces.empty()) {
+            if (!draws.empty()) {
                 TransDraw& prev = draws.back();
-                if (prev.flags == item.flags && prev.texture == tex &&
+                bool surfaceBetween = false;
+                if (!surfaces.empty() && prev.order != item.order) {
+                    auto it = std::lower_bound(surfaces.begin(), surfaces.end(), prev.order, [](const TranslucentSurface& s, int32_t ord) {
+                        return s.order < ord;
+                    });
+                    if (it != surfaces.end() && it->order <= item.order - 1) {
+                        surfaceBetween = true;
+                    }
+                }
+                if (!surfaceBetween && prev.flags == item.flags && prev.texture == tex &&
                     prev.extra.lightmap == extra.lightmap &&
                     prev.extra.lightMask == extra.lightMask &&
                     prev.extra.cull == extra.cull) {
@@ -2632,13 +2917,21 @@ namespace dx {
             }
             draws.push_back({ item.order, item.flags, tex, extra, first, count });
         }
+        if (view.recursion == 0) {
+            frameStats.transDraws = static_cast<int>(draws.size());
+        }
         if (totalVerts == 0) {
             translucentCount = 0;
             drawSurfacesBefore(std::numeric_limits<int32_t>::max());
+            if (view.recursion == 0) {
+                frameStats.transSurfMs = surfMs;
+                frameStats.transSurfCalls = surfCalls;
+            }
             surfaces.clear();
             device->setBlend(BlendMode::Opaque);
             return;
         }
+        const float tu0 = view.recursion == 0 ? profNowMs() : 0.0f;
         GLVertex* mapped = device->beginUpload(totalVerts);
         if (mapped) {
             GLVertex* dst = mapped;
@@ -2661,6 +2954,7 @@ namespace dx {
             }
             device->upload(combined);
         }
+        const float tu1 = view.recursion == 0 ? profNowMs() : 0.0f;
         translucentCount = 0;
         uint32_t lastFlags = 0;
         int32_t lastShaderFlags = 0;
@@ -2668,6 +2962,8 @@ namespace dx {
         uint32_t lastLightmap = 0;
         uint32_t lastLightMask = 0;
         bool lastCull = false;
+        const float td0 = view.recursion == 0 ? profNowMs() : 0.0f;
+        const float surfBeforeDraws = surfMs;
         for (const TransDraw& d : draws) {
             drawSurfacesBefore(d.order - 1);
             if (!d.extra.lightmap) {
@@ -2718,6 +3014,12 @@ namespace dx {
             device->drawRange(d.first, d.count);
         }
         drawSurfacesBefore(std::numeric_limits<int32_t>::max());
+        if (view.recursion == 0) {
+            frameStats.transUpMs = tu1 - tu0;
+            frameStats.transSurfMs = surfMs;
+            frameStats.transSurfCalls = surfCalls;
+            frameStats.transDrawMs = (profNowMs() - td0) - (surfMs - surfBeforeDraws);
+        }
         surfaces.clear();
         device->setBlend(BlendMode::Opaque);
     }
@@ -3057,6 +3359,20 @@ namespace dx {
         for (int slot = 0; slot < 4 && sameGeometry; slot++) {
             sameGeometry = cache.blendSequences[slot] == animState.blendSequences[slot] && cache.blendFrames[slot] == animState.blendFrames[slot];
         }
+#ifdef __ANDROID__
+        if (!sameGeometry && cache.valid && !cache.groups.empty() && view.recursion == 0) {
+            const float distSq = (transform.origin - view.location).sizeSquared();
+            if (distSq > 900.0f * 900.0f) {
+                const float moveSq = (cache.transform.origin - transform.origin).sizeSquared();
+                if (moveSq < 16.0f) {
+                    const uint64_t animMask = distSq > 1600.0f * 1600.0f ? 3u : 1u;
+                    if (((sceneFrame + actor->handle) & animMask) != 0) {
+                        sameGeometry = true;
+                    }
+                }
+            }
+        }
+#endif
         float eyeLimit = cache.hasEnvironment ? 4.0f : std::max(100.0f, (transform.origin - view.location).sizeSquared() * 0.004f);
         const uint64_t cacheAge = sceneFrame - cache.lastFullFrame;
         const uint64_t staggerMask = cache.steadyLights ? 63u : 15u;
@@ -3180,7 +3496,6 @@ namespace dx {
                 const Vector& b = pose[static_cast<size_t>(triangle.vertex[1])];
                 const Vector& c = pose[static_cast<size_t>(triangle.vertex[2])];
                 Vector normal = (b - a).cross(c - a);
-                normal = normal * (1.0f / std::sqrt(normal.sizeSquared() + 0.001f));
                 for (int i = 0; i < 3; i++) {
                     normals[static_cast<size_t>(triangle.vertex[i])] += normal;
                 }
@@ -3406,14 +3721,9 @@ namespace dx {
                 if (flags & PF_Modulated) {
                     color = { 1, 1, 1 };
                 }
-                vertex.r = std::min(color.x, 1.0f);
-                vertex.g = std::min(color.y, 1.0f);
-                vertex.b = std::min(color.z, 1.0f);
-                vertex.a = 1;
+                vertex.setColor(color.x, color.y, color.z);
                 if (fogged) {
-                    vertex.fogR = fogAt[index].x;
-                    vertex.fogG = fogAt[index].y;
-                    vertex.fogB = fogAt[index].z;
+                    vertex.setFog(fogAt[index].x, fogAt[index].y, fogAt[index].z);
                 }
                 out.push_back(vertex);
             }
@@ -3472,9 +3782,7 @@ namespace dx {
             vertex.z = corners[index].z;
             vertex.u = us[index];
             vertex.v = vs[index];
-            vertex.r = glow;
-            vertex.g = glow;
-            vertex.b = glow;
+            vertex.setColor(glow, glow, glow);
             vertices.push_back(vertex);
         }
         if (isTranslucentFlags(flags)) {
@@ -3612,9 +3920,7 @@ namespace dx {
                     vertex.x = world.x;
                     vertex.y = world.y;
                     vertex.z = world.z;
-                    vertex.nx = normal.x;
-                    vertex.ny = normal.y;
-                    vertex.nz = normal.z;
+                    vertex.setNormal(normal.x, normal.y, normal.z);
                     vertex.u = ((point - poly.base).dot(poly.textureU) + static_cast<float>(poly.panU)) / (texWidth * drawScale);
                     vertex.v = ((point - poly.base).dot(poly.textureV) + static_cast<float>(poly.panV)) / (texHeight * drawScale);
                     if (!unlit) {
@@ -3624,9 +3930,7 @@ namespace dx {
                         } else {
                             const Vector& surfaceAmbient = surfAmbient[polyNumber];
                             Vector level = Vector { std::floor(surfaceAmbient.x * 64.0f), std::floor(surfaceAmbient.y * 64.0f), std::floor(surfaceAmbient.z * 64.0f) } * (2.0f / 127.5f);
-                            vertex.r = std::min(level.x, 1.0f);
-                            vertex.g = std::min(level.y, 1.0f);
-                            vertex.b = std::min(level.z, 1.0f);
+                            vertex.setColor(level.x, level.y, level.z);
                         }
                     }
                     polygon.push_back(vertex);
@@ -3794,9 +4098,7 @@ namespace dx {
                 vertex.u = ((point - poly.base).dot(poly.textureU) + static_cast<float>(poly.panU)) / (width * drawScale);
                 vertex.v = ((point - poly.base).dot(poly.textureV) + static_cast<float>(poly.panV)) / (height * drawScale);
                 Vector color = actorLight(actor, worldPoint, normal, ambient, 1.0f, unlit, nullptr);
-                vertex.r = color.x;
-                vertex.g = color.y;
-                vertex.b = color.z;
+                vertex.setColor(color.x, color.y, color.z);
                 polygon.push_back(vertex);
             }
             uint32_t textureId = info ? info->id : device->whiteTexture();
@@ -3880,9 +4182,7 @@ namespace dx {
                         vertex.z = point.z + lift.z;
                         vertex.u = (point - piece.vertices[0]).dot(uAxis) / uSize;
                         vertex.v = (point - piece.vertices[0]).dot(vAxis) / vSize;
-                        vertex.r = 1.0f;
-                        vertex.g = 1.0f;
-                        vertex.b = 1.0f;
+                        vertex.setColor(1.0f, 1.0f, 1.0f);
                         vertices.push_back(vertex);
                     }
                 }
@@ -4066,6 +4366,13 @@ namespace dx {
             if (actor::bHidden(actor) || actor::bDeleteMe(actor)) {
                 continue;
             }
+            uint8_t drawType = actor::DrawType(actor);
+            if (drawType != DT_Mesh && !(drawType == DT_Brush && actor->hasClassBit(CLS_Mover)) && !drawnAsSprite(drawType) && !actor->hasClassBit(CLS_Decal)) {
+                if (iteratorHook && (actor::RenderIteratorClass(actor) || actor::RenderInterface(actor))) {
+                    deferred.push_back(actor);
+                }
+                continue;
+            }
             if (actor == viewActor && !behindView) {
                 continue;
             }
@@ -4078,10 +4385,6 @@ namespace dx {
             }
             if (iteratorHook && (actor::RenderIteratorClass(actor) || actor::RenderInterface(actor))) {
                 deferred.push_back(actor);
-                continue;
-            }
-            uint8_t drawType = actor::DrawType(actor);
-            if (drawType != DT_Mesh && !(drawType == DT_Brush && actor->hasClassBit(CLS_Mover)) && !drawnAsSprite(drawType) && !actor->hasClassBit(CLS_Decal)) {
                 continue;
             }
             if (drawType == DT_Mesh) {
@@ -4353,10 +4656,11 @@ namespace dx {
                 frameStats.skyMs = nowMs() - ts0;
             }
         }
-        if (!levelData.mirrors.empty() && !wireframe) {
-            drawMirrors(view, actors);
-            device->setDepthWrite(true);
-            device->clear(false, true, 1.0f);
+        if (!levelData.mirrors.empty() && !wireframe && view.visibility) {
+            if (drawMirrors(view, actors)) {
+                device->setDepthWrite(true);
+                device->clear(false, true, 1.0f);
+            }
         }
         collectVolumetrics(view);
         if (wireframe) {
@@ -4442,9 +4746,7 @@ namespace dx {
             for (const auto& [first, count, node] : batch.nodePolys) {
                 Vector color = index == 0 ? zoneColor(batch.zone, node, textureColor) : bspCutColor(node);
                 for (int32_t i = first; i < first + count; i++) {
-                    vertices[static_cast<size_t>(i)].r = color.x;
-                    vertices[static_cast<size_t>(i)].g = color.y;
-                    vertices[static_cast<size_t>(i)].b = color.z;
+                    vertices[static_cast<size_t>(i)].setColor(color.x, color.y, color.z);
                 }
             }
         }

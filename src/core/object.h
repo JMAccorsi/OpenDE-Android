@@ -109,6 +109,7 @@ namespace dx {
         uint8_t* data = nullptr;
         Linker* linker = nullptr;
         int32_t exportRef = 0;
+        int32_t collisionSlot = -1;
         bool loaded = true;
         bool destroyed = false;
         bool singular = false;
@@ -291,6 +292,9 @@ namespace dx {
         CLS_ZoneInfo = 1u << 6,
         CLS_SkyZoneInfo = 1u << 7,
         CLS_LevelInfo = 1u << 8,
+        CLS_Inventory = 1u << 9,
+        CLS_Animal = 1u << 10,
+        CLS_FlockPawn = 1u << 11,
     };
 
     class UClass : public UState {

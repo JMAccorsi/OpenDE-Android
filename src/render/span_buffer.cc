@@ -42,8 +42,11 @@ namespace dx {
         wordsPerRow = (columns + 63) >> 6;
         bits.assign(static_cast<size_t>(rowCount * wordsPerRow), 0ull);
         rowOpen.assign(static_cast<size_t>(rowCount), 0u);
+        const int32_t rowWords = (rowCount + 63) >> 6;
+        rowOpenMask.assign(static_cast<size_t>(rowWords), 0ull);
         if (columns <= 0 || rowCount <= 0) {
             openRows = 0;
+            anyCovered = true;
             return;
         }
         const uint64_t lastMask = maskToInclusive((columns - 1) & 63);
@@ -55,7 +58,12 @@ namespace dx {
             rowBits[wordsPerRow - 1] = lastMask;
             rowOpen[static_cast<size_t>(y)] = 1u;
         }
+        for (int32_t rw = 0; rw + 1 < rowWords; ++rw) {
+            rowOpenMask[static_cast<size_t>(rw)] = ~0ull;
+        }
+        rowOpenMask[static_cast<size_t>(rowWords - 1)] = maskToInclusive((rowCount - 1) & 63);
         openRows = rowCount;
+        anyCovered = false;
     }
 
     void SpanBuffer::reset(int32_t width, int32_t height, const std::vector<ScreenSpan>& open)
@@ -65,7 +73,9 @@ namespace dx {
         wordsPerRow = (columns + 63) >> 6;
         bits.assign(static_cast<size_t>(rowCount * wordsPerRow), 0ull);
         rowOpen.assign(static_cast<size_t>(rowCount), 0u);
+        rowOpenMask.assign(static_cast<size_t>((rowCount + 63) >> 6), 0ull);
         openRows = 0;
+        anyCovered = true;
         if (columns <= 0 || rowCount <= 0) {
             return;
         }
@@ -79,6 +89,7 @@ namespace dx {
             setBitRange(rowBits, x0, x1);
             if (!rowOpen[static_cast<size_t>(span.y)]) {
                 rowOpen[static_cast<size_t>(span.y)] = 1u;
+                rowOpenMask[static_cast<size_t>(span.y >> 6)] |= (1ull << static_cast<unsigned>(span.y & 63));
                 openRows++;
             }
         }
@@ -122,30 +133,54 @@ namespace dx {
         const int32_t w1 = (x1 - 1) >> 6;
         const uint64_t m0 = maskFrom(x0 & 63);
         const uint64_t m1 = maskToInclusive((x1 - 1) & 63);
+        const int32_t rw0 = y0 >> 6;
+        const int32_t rw1 = (y1 - 1) >> 6;
+        const uint64_t rm0 = maskFrom(y0 & 63);
+        const uint64_t rm1 = maskToInclusive((y1 - 1) & 63);
         if (w0 == w1) {
             const uint64_t mask = m0 & m1;
-            for (int32_t y = y0; y < y1; ++y) {
-                if (rowOpen[static_cast<size_t>(y)] && (bits[static_cast<size_t>(y * wordsPerRow + w0)] & mask) != 0ull) {
-                    return true;
+            const uint64_t* base = bits.data() + w0;
+            for (int32_t rw = rw0; rw <= rw1; ++rw) {
+                uint64_t rword = rowOpenMask[static_cast<size_t>(rw)];
+                if (rw == rw0) {
+                    rword &= rm0;
+                }
+                if (rw == rw1) {
+                    rword &= rm1;
+                }
+                while (rword) {
+                    const int32_t y = (rw << 6) + std::countr_zero(rword);
+                    rword &= rword - 1;
+                    if ((base[static_cast<size_t>(y * wordsPerRow)] & mask) != 0ull) {
+                        return true;
+                    }
                 }
             }
             return false;
         }
-        for (int32_t y = y0; y < y1; ++y) {
-            if (!rowOpen[static_cast<size_t>(y)]) {
-                continue;
+        for (int32_t rw = rw0; rw <= rw1; ++rw) {
+            uint64_t rword = rowOpenMask[static_cast<size_t>(rw)];
+            if (rw == rw0) {
+                rword &= rm0;
             }
-            const uint64_t* rowBits = bits.data() + static_cast<size_t>(y * wordsPerRow);
-            if ((rowBits[w0] & m0) != 0ull) {
-                return true;
+            if (rw == rw1) {
+                rword &= rm1;
             }
-            for (int32_t w = w0 + 1; w < w1; ++w) {
-                if (rowBits[w] != 0ull) {
+            while (rword) {
+                const int32_t y = (rw << 6) + std::countr_zero(rword);
+                rword &= rword - 1;
+                const uint64_t* rowBits = bits.data() + static_cast<size_t>(y * wordsPerRow);
+                if ((rowBits[w0] & m0) != 0ull) {
                     return true;
                 }
-            }
-            if ((rowBits[w1] & m1) != 0ull) {
-                return true;
+                for (int32_t w = w0 + 1; w < w1; ++w) {
+                    if (rowBits[w] != 0ull) {
+                        return true;
+                    }
+                }
+                if ((rowBits[w1] & m1) != 0ull) {
+                    return true;
+                }
             }
         }
         return false;
@@ -171,6 +206,12 @@ namespace dx {
         int32_t polyX0 = std::max(static_cast<int32_t>(std::floor(minX)) - 1, 0);
         int32_t polyX1 = std::min(static_cast<int32_t>(std::ceil(maxX)) + 1, columns);
         if (first >= last || polyX0 >= polyX1) {
+            return false;
+        }
+        if (!visible && !anyCovered) {
+            return true;
+        }
+        if (!rectVisible(polyX0, first, polyX1, last)) {
             return false;
         }
         struct PolyEdge {
@@ -223,8 +264,21 @@ namespace dx {
                 }
                 float start = edge.aX + (std::max(low, edge.low) - edge.aY) * edge.slope;
                 float end = edge.aX + (std::min(high, edge.high) - edge.aY) * edge.slope;
-                left = std::min({ left, start, end });
-                right = std::max({ right, start, end });
+                if (start < end) {
+                    if (start < left) {
+                        left = start;
+                    }
+                    if (end > right) {
+                        right = end;
+                    }
+                } else {
+                    if (end < left) {
+                        left = end;
+                    }
+                    if (start > right) {
+                        right = start;
+                    }
+                }
             }
             if (left > right) {
                 continue;
@@ -319,7 +373,7 @@ namespace dx {
         int32_t last = std::min(static_cast<int32_t>(std::ceil(bottom - 0.5f)), rowCount);
         int32_t polyX0 = std::max(static_cast<int32_t>(std::ceil(minX - 0.5f)), 0);
         int32_t polyX1 = std::min(static_cast<int32_t>(std::ceil(maxX - 0.5f)), columns);
-        if (first >= last || polyX0 >= polyX1) {
+        if (first >= last || polyX0 >= polyX1 || !rectVisible(polyX0, first, polyX1, last)) {
             return;
         }
         struct OccludeEdge {
@@ -375,6 +429,7 @@ namespace dx {
         if (!rowOpen[static_cast<size_t>(y)]) {
             return;
         }
+        anyCovered = true;
         uint64_t* rowBits = bits.data() + static_cast<size_t>(y * wordsPerRow);
         const int32_t w0 = x0 >> 6;
         const int32_t w1 = (x1 - 1) >> 6;
@@ -395,6 +450,7 @@ namespace dx {
         }
         if (any == 0ull) {
             rowOpen[static_cast<size_t>(y)] = 0u;
+            rowOpenMask[static_cast<size_t>(y >> 6)] &= ~(1ull << static_cast<unsigned>(y & 63));
             openRows--;
         }
     }

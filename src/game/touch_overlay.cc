@@ -177,7 +177,7 @@ namespace game {
             if (radius <= 1.0f || color.a <= 0.005f) {
                 return;
             }
-            constexpr int kSlices = 14;
+            constexpr int kSlices = 9;
             const float r2 = radius * radius;
             float prevY = -radius;
             for (int i = -kSlices + 1; i <= kSlices; ++i) {
@@ -202,22 +202,33 @@ namespace game {
             if (radius <= 1.0f || color.a <= 0.005f) {
                 return;
             }
-            constexpr int kSegs = 28;
-            const float twoPi = 6.2831853f;
-            int rings = std::max(1, static_cast<int>(std::round(thickness)));
+            constexpr int kSegs = 18;
+            struct CircleLut {
+                float c[kSegs + 1];
+                float s[kSegs + 1];
+                CircleLut()
+                {
+                    constexpr float twoPi = 6.2831853f;
+                    for (int i = 0; i <= kSegs; ++i) {
+                        float a = (static_cast<float>(i) / static_cast<float>(kSegs)) * twoPi;
+                        c[i] = std::cos(a);
+                        s[i] = std::sin(a);
+                    }
+                }
+            };
+            static const CircleLut lut;
+            int rings = std::clamp(static_cast<int>(std::round(thickness)), 1, 2);
             for (int ring = 0; ring < rings; ++ring) {
                 float r = radius - static_cast<float>(ring);
                 if (r <= 1.0f) {
                     break;
                 }
                 for (int i = 0; i < kSegs; ++i) {
-                    float a0 = (static_cast<float>(i) / static_cast<float>(kSegs)) * twoPi;
-                    float a1 = (static_cast<float>(i + 1) / static_cast<float>(kSegs)) * twoPi;
                     canvas.drawLine(
-                        cx + std::cos(a0) * r,
-                        cy + std::sin(a0) * r,
-                        cx + std::cos(a1) * r,
-                        cy + std::sin(a1) * r,
+                        cx + lut.c[i] * r,
+                        cy + lut.s[i] * r,
+                        cx + lut.c[i + 1] * r,
+                        cy + lut.s[i + 1] * r,
                         color);
                 }
             }

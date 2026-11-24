@@ -814,7 +814,11 @@ namespace {
             render.smoothLightmaps = videoSetting("SmoothLightmaps", 0) != 0;
             const float detailDistances[] = { 380.0f, 1024.0f, 2048.0f };
             render.detailDistance = detailDistances[std::clamp(videoSetting("DetailDistance", 0), 0, 2)];
+#ifdef __ANDROID__
+            render.textureRate = videoSetting("LimitTextureAnimation", 1) != 0 ? 12.0f : 0.0f;
+#else
             render.textureRate = videoSetting("LimitTextureAnimation", 1) != 0 ? 60.0f : 0.0f;
+#endif
             render.ambientOcclusion = static_cast<dx::OcclusionQuality>(std::clamp(videoSetting("AmbientOcclusion", 0), 0, 3));
             renderer->setOptions(render);
             constexpr float kUIScaleValues[] = { 0.0f, 1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.25f, 2.5f, 2.75f, 3.0f, 3.5f, 4.0f };
@@ -1776,6 +1780,7 @@ namespace {
                     viewActor = dx::playerpawn::ViewTarget(player) ? dx::playerpawn::ViewTarget(player) : player;
                 }
                 renderer->drawScene(world->level, world->actors, viewLocation, viewRotation, viewFov, viewActor);
+                float tHud0 = dx::profNowMs();
                 dx::UObject* canvasActor = canvas(width, height);
                 if (player && !player->destroyed) {
                     dx::vm::Call(player, dx::Name("PreRender")).obj(canvasActor).run();
@@ -1791,7 +1796,9 @@ namespace {
                         dx::vm::Call(console, dx::Name("PostRender")).obj(canvasActor).run();
                     }
                 }
+                profHudMs = dx::profNowMs() - tHud0;
             }
+            float tOvl0 = dx::profNowMs();
             if (touchOverlay.isVisible() && touchOverlay.isAugDrawerOpen() && world && world->player()) {
                 std::vector<game::TouchAugEntry> augs;
                 dx::UObject* player = world->player();
@@ -1867,7 +1874,12 @@ namespace {
                 dx::extension::wantsMouse() || dx::extension::isModalOpen(),
                 keypadOpen, kx, ky, kw, kh);
             perfOverlay.render(renderer->canvas(), width, height);
+            float tCf0 = dx::profNowMs();
             renderer->endFrame();
+            float tOvl1 = dx::profNowMs();
+            profOvlUiMs = tCf0 - tOvl0;
+            profOvlCfMs = tOvl1 - tCf0;
+            profOvlMs = tOvl1 - tOvl0;
         }
 
         std::vector<uint8_t> captureScene(int width, int height)
@@ -2433,7 +2445,7 @@ namespace {
                 float fps = delta > 0.0001f ? (1.0f / delta) : 0.0f;
                 const auto& st = renderer->stats();
                 SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
-                    "OpenDE_Perf: frame=%d fps=%.1f tick=%.2f[s=%.2f a=%.2f ai=%.2f n=%d] render=%.2f (lgt=%.2f occ=%.2f sky=%.2f bsp=%.2f act=%.2f[c=%.2f e=%.2f f=%.2f n=%d b=%d m=%d/%d/%d(g=%d u=%d l=%d)] cor=%.2f ssao=%.2f fxaa=%.2f dc=%d tri=%d lmUp=%d) swap=%.2f res=%dx%d",
+                    "OpenDE_Perf: frame=%d fps=%.1f tick=%.2f[s=%.2f a=%.2f ai=%.2f n=%d] render=%.2f (lgt=%.2f occ=%.2f sky=%.2f bsp=%.2f act=%.2f[w=%.2f c=%.2f e=%.2f f=%.2f t=%.2f(s=%.2f[%d/%d] u=%.2f d=%.2f[%d]) n=%d b=%d m=%d/%d/%d(g=%d u=%d l=%d)] cor=%.2f hud=%.2f ovl=%.2f(ui=%.2f cf=%.2f) ssao=%.2f fxaa=%.2f dc=%d tri=%d lmUp=%d) swap=%.2f res=%dx%d",
                     frame, static_cast<double>(fps),
                     static_cast<double>(profTickMs),
                     static_cast<double>(world ? world->profSyncMs : 0.0f),
@@ -2444,10 +2456,16 @@ namespace {
                     static_cast<double>(st.lightsMs), static_cast<double>(st.occludeMs),
                     static_cast<double>(st.skyMs), static_cast<double>(st.bspMs),
                     static_cast<double>(st.actorsMs),
+                    static_cast<double>(st.actWaitMs),
                     static_cast<double>(st.actCandMs), static_cast<double>(st.actEmitMs), static_cast<double>(st.actFlushMs),
+                    static_cast<double>(st.actTransMs),
+                    static_cast<double>(st.transSurfMs), st.transSurfCalls, st.transSurfaces,
+                    static_cast<double>(st.transUpMs), static_cast<double>(st.transDrawMs), st.transDraws,
                     st.actActors, st.actBatches,
                     st.meshFast, st.meshFull, st.meshRebuild, st.meshRebGeom, st.meshRebUncache, st.meshRebLight,
                     static_cast<double>(st.coronasMs),
+                    static_cast<double>(profHudMs), static_cast<double>(profOvlMs),
+                    static_cast<double>(profOvlUiMs), static_cast<double>(profOvlCfMs),
                     static_cast<double>(st.ssaoMs), static_cast<double>(st.fxaaMs),
                     st.drawCalls, st.triangles, st.lightmapUploads,
                     static_cast<double>(profSwapMs), width, height);
@@ -2542,6 +2560,10 @@ namespace {
         uint64_t frameDeadline = 0;
         float profTickMs = 0.0f;
         float profRenderMs = 0.0f;
+        float profHudMs = 0.0f;
+        float profOvlMs = 0.0f;
+        float profOvlUiMs = 0.0f;
+        float profOvlCfMs = 0.0f;
         float profSwapMs = 0.0f;
         std::unordered_map<dx::UClass*, std::pair<float, float>> basePlayerSpeeds;
     };
