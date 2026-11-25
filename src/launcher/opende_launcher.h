@@ -13,7 +13,7 @@ namespace game {
         std::string gameRoot;
         std::string fontsDir;
         std::string initialMod;
-        std::string versionLabel = "0.6-beta";
+        std::string versionLabel = "0.6.1-beta";
     };
 
     struct LauncherOutcome {
