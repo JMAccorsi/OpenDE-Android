@@ -15,6 +15,7 @@ namespace dx {
     namespace {
         struct NativeMaps {
             std::unordered_map<std::string, NativeFunction> byName;
+            std::unordered_map<std::string, NativeFunction> scriptOverrides;
             std::set<std::string> warned;
         };
 
@@ -932,6 +933,28 @@ namespace dx {
         void registerNative(std::string_view className, std::string_view functionName, NativeFunction function)
         {
             nativeMaps().byName[lowerKey(className) + "." + lowerKey(functionName)] = function;
+        }
+
+        void registerScriptOverride(std::string_view className, std::string_view functionName, NativeFunction function)
+        {
+            nativeMaps().scriptOverrides[lowerKey(className) + "." + lowerKey(functionName)] = function;
+        }
+
+        NativeFunction findScriptOverride(UFunction* function)
+        {
+            auto& overrides = nativeMaps().scriptOverrides;
+            if (!function || overrides.empty()) {
+                return nullptr;
+            }
+            UObject* owner = function->outer;
+            while (owner && !cast<UClass>(owner)) {
+                owner = owner->outer;
+            }
+            if (!owner) {
+                return nullptr;
+            }
+            auto it = overrides.find(lowerKey(owner->name.str()) + "." + lowerKey(function->name.str()));
+            return it != overrides.end() ? it->second : nullptr;
         }
 
         NativeFunction bindNative(UFunction* function)

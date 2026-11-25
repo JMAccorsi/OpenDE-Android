@@ -91,6 +91,7 @@ namespace dx {
         void drawScene(ULevel* level, const std::vector<UObject*>& actors, const Vector& location, const Rotator& rotation, float fov, UObject* viewActor);
         void drawSceneRect(ULevel* level, const std::vector<UObject*>& actors, const Vector& location, const Rotator& rotation, float fov, UObject* viewActor, int x, int y, int width, int height);
         void drawActorOverlay(UObject* actor, const Vector& viewLocation, const Rotator& viewRotation, float fov, bool clearZ);
+        void drawScreenFlash(const Vector& flashScale, const Vector& flashFog);
         Canvas2D& canvas();
         void endFrame();
         void applyBrightness(float brightness);

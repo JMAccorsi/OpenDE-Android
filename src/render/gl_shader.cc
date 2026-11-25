@@ -999,7 +999,7 @@ void main()
 
     float UberShader::activeGamma() const
     {
-        if (blendInitialized && (currentBlend == BlendMode::Modulated || currentBlend == BlendMode::Translucent)) {
+        if (blendInitialized && currentBlend == BlendMode::Modulated) {
             return 1.0f;
         }
         return state.gamma;

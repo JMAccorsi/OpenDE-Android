@@ -1736,13 +1736,19 @@ namespace dx {
                 }
                 std::sort(ranges.begin(), ranges.end());
                 const bool singleSided = (batch.polyFlags & PF_TwoSided) == 0;
-                const std::vector<BspNode>& bspNodes = levelData.model->nodes;
+                const std::vector<GLVertex>& verts = levelData.vertices;
                 for (const auto& [first, count, node] : ranges) {
-                    if (singleSided) {
-                        const BspNode& bspNode = bspNodes[static_cast<size_t>(node)];
-                        const float side = bspNode.plane.x * view.location.x + bspNode.plane.y * view.location.y + bspNode.plane.z * view.location.z - bspNode.plane.w;
-                        if ((!batch.reversed && side < -1.0f) || (batch.reversed && side > 1.0f)) {
-                            continue;
+                    if (singleSided && count >= 3 && static_cast<size_t>(first + 2) < verts.size()) {
+                        const Vector v0 { verts[static_cast<size_t>(first)].x, verts[static_cast<size_t>(first)].y, verts[static_cast<size_t>(first)].z };
+                        const Vector v1 { verts[static_cast<size_t>(first + 1)].x, verts[static_cast<size_t>(first + 1)].y, verts[static_cast<size_t>(first + 1)].z };
+                        const Vector v2 { verts[static_cast<size_t>(first + 2)].x, verts[static_cast<size_t>(first + 2)].y, verts[static_cast<size_t>(first + 2)].z };
+                        const Vector n = (v1 - v0).cross(v2 - v0);
+                        const float nLenSq = n.sizeSquared();
+                        if (nLenSq > 1e-6f) {
+                            const float d = n.dot(view.location - v0);
+                            if (d < 0.0f && d * d > nLenSq) {
+                                continue;
+                            }
                         }
                     }
                     surfaces.push_back({ nodeOrder[static_cast<size_t>(node)], &batch, first, count, node });
@@ -4935,6 +4941,46 @@ namespace dx {
         flushTranslucent(view);
         device->setCulling(false);
         device->setDepthTest(false);
+    }
+
+    void SceneRenderer::drawScreenFlash(const Vector& flashScale, const Vector& flashFog)
+    {
+        const float scale = std::clamp(flashScale.x, 0.0f, 1.0f);
+        const float fogR = std::clamp(flashFog.x, 0.0f, 1.0f);
+        const float fogG = std::clamp(flashFog.y, 0.0f, 1.0f);
+        const float fogB = std::clamp(flashFog.z, 0.0f, 1.0f);
+        const float alpha = 1.0f - scale;
+        if (alpha <= 0.001f && fogR <= 0.001f && fogG <= 0.001f && fogB <= 0.001f) {
+            return;
+        }
+        device->flushCanvas();
+        device->setViewport(0, 0, frameWidth, frameHeight);
+        device->useShader();
+        device->setViewProj(orthoMatrix(static_cast<float>(frameWidth), static_cast<float>(frameHeight)));
+        device->setPan(0, 0);
+        device->setScale(1, 1);
+        device->setTint(1, 1, 1, 1);
+        device->setClipPlanes(nullptr, 0);
+        device->setDepthTest(false);
+        device->setDepthWrite(false);
+        device->setCulling(false);
+        device->setFlags(0);
+        device->setBlend(BlendMode::Highlight);
+        const float w = static_cast<float>(frameWidth);
+        const float h = static_cast<float>(frameHeight);
+        std::vector<GLVertex> quad(6);
+        quad[0].x = 0; quad[0].y = 0;
+        quad[1].x = w; quad[1].y = 0;
+        quad[2].x = w; quad[2].y = h;
+        quad[3].x = 0; quad[3].y = 0;
+        quad[4].x = w; quad[4].y = h;
+        quad[5].x = 0; quad[5].y = h;
+        for (GLVertex& v : quad) {
+            v.setColor(fogR, fogG, fogB, alpha);
+        }
+        device->draw(quad, Primitive::Triangles);
+        device->setBlend(BlendMode::Opaque);
+        device->setDepthWrite(true);
     }
 
     uint32_t SceneRenderer::flatVao()

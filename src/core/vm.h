@@ -48,8 +48,10 @@ namespace dx {
         constexpr uint8_t EX_IteratorNext = 0x31;
 
         NativeFunction bindNative(UFunction* function);
+        NativeFunction findScriptOverride(UFunction* function);
         void registerNative(int32_t index, NativeFunction function);
         void registerNative(std::string_view className, std::string_view functionName, NativeFunction function);
+        void registerScriptOverride(std::string_view className, std::string_view functionName, NativeFunction function);
         void callFunction(Frame& stack, UObject* context, UFunction* function, void* result);
         void execute(Frame& frame);
         UFunction* findFunction(UObject* object, Name functionName, bool global = false);

@@ -568,6 +568,9 @@ namespace dx {
         stub.push_back(0x16);
         if (functionFlags & FUNC_Native) {
             native = vm::bindNative(this);
+        } else if (NativeFunction overrideFn = vm::findScriptOverride(this)) {
+            native = overrideFn;
+            functionFlags |= FUNC_Native;
         }
         isNoop = !(functionFlags & FUNC_Native) && !returnParm && (
             script.empty() ||

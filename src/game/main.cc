@@ -1788,6 +1788,9 @@ namespace {
                         dx::vm::Call(viewActor, dx::Name("RenderOverlays")).obj(canvasActor).run();
                     }
                     dx::vm::Call(player, dx::Name("PostRenderFlash")).obj(canvasActor).run();
+                    if (player->data && player->hasClassBit(dx::CLS_PlayerPawn)) {
+                        renderer->drawScreenFlash(dx::playerpawn::FlashScale(player), dx::playerpawn::FlashFog(player));
+                    }
                     dx::vm::Call(player, dx::Name("PostRender")).obj(canvasActor).run();
                     dx::UObject* console = scriptConsole();
                     if (console) {

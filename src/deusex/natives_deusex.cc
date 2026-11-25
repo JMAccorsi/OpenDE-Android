@@ -1341,6 +1341,70 @@ namespace dx {
     }
 
     namespace engine {
+        namespace {
+            void nativeDeusExPlayerViewFlash(UObject* self, Frame& stack, void*)
+            {
+                const float deltaTime = vm::get<float>(stack);
+                vm::finish(stack);
+                if (!self || !self->data) {
+                    return;
+                }
+                float reductionFactor = 2.0f;
+                if (offsets_deusexplayer.FlashTimer != 0) {
+                    float& flashTimer = deusexplayer::FlashTimer(self);
+                    if (flashTimer > 0.0f) {
+                        if (flashTimer < deltaTime) {
+                            flashTimer = 0.0f;
+                        } else {
+                            reductionFactor = 0.0f;
+                            flashTimer -= deltaTime;
+                        }
+                    }
+                }
+                if (playerpawn::bNoFlash(self) != 0) {
+                    playerpawn::InstantFlash(self) = 0.0f;
+                    playerpawn::InstantFog(self) = {};
+                }
+                const float delta = std::min(0.1f, std::max(0.0f, deltaTime));
+                UObject* headZone = reinterpret_cast<const PointRegion*>(pawn::HeadRegion(self))->zone;
+                Vector zoneFlash {};
+                Vector zoneFog {};
+                if (headZone && !headZone->destroyed && headZone->data && headZone->hasClassBit(CLS_ZoneInfo)) {
+                    zoneFlash = zoneinfo::ViewFlash(headZone);
+                    zoneFog = zoneinfo::ViewFog(headZone);
+                }
+                float& desiredFlashScale = playerpawn::DesiredFlashScale(self);
+                Vector& desiredFlashFog = playerpawn::DesiredFlashFog(self);
+                float& instantFlash = playerpawn::InstantFlash(self);
+                Vector& instantFog = playerpawn::InstantFog(self);
+                Vector& flashScale = playerpawn::FlashScale(self);
+                Vector& flashFog = playerpawn::FlashFog(self);
+                const float goalScale = 1.0f + desiredFlashScale + playerpawn::ConstantGlowScale(self) + zoneFlash.x;
+                const Vector goalFog = desiredFlashFog + playerpawn::ConstantGlowFog(self) + zoneFog;
+                desiredFlashScale -= desiredFlashScale * reductionFactor * delta;
+                desiredFlashFog -= desiredFlashFog * (reductionFactor * delta);
+                flashScale.x += (goalScale - flashScale.x + instantFlash) * 10.0f * delta;
+                flashFog += (goalFog - flashFog + instantFog) * (10.0f * delta);
+                instantFlash = 0.0f;
+                instantFog = {};
+
+                if (flashScale.x > 0.981f && goalScale > 0.981f) {
+                    flashScale.x = 1.0f;
+                }
+                flashScale = Vector { flashScale.x, flashScale.x, flashScale.x };
+
+                if (flashFog.x < 0.019f && goalFog.x <= 0.001f) {
+                    flashFog.x = 0.0f;
+                }
+                if (flashFog.y < 0.019f && goalFog.y <= 0.001f) {
+                    flashFog.y = 0.0f;
+                }
+                if (flashFog.z < 0.019f && goalFog.z <= 0.001f) {
+                    flashFog.z = 0.0f;
+                }
+            }
+        }
+
         void registerDeusExNatives()
         {
             vm::registerNative(2100, nativeConBindEvents);
@@ -1395,6 +1459,7 @@ namespace dx {
             vm::registerNative(3092, nativeNothing);
             vm::registerNative(3093, nativeGetSaveFreeSpace);
             vm::registerNative(3094, nativeGetSaveDirectorySize);
+            vm::registerScriptOverride("DeusExPlayer", "ViewFlash", nativeDeusExPlayerViewFlash);
         }
     }
 }
