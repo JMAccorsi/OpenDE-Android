@@ -146,6 +146,11 @@ namespace dx {
             std::vector<std::pair<int32_t, int32_t>> leaves;
             std::vector<std::pair<int32_t, int32_t>> culled;
             int32_t endSequence = 0;
+            std::vector<int32_t> tileCoverSeq;
+            int32_t tileCols = 0;
+            int32_t tileRows = 0;
+            int32_t tileColumns = 0;
+            int32_t tileRowCount = 0;
             std::vector<std::vector<ScreenSpan>> mirrorSpans;
             std::vector<ScreenSpan> backdropSpans;
         };
@@ -229,6 +234,7 @@ namespace dx {
         };
 
         struct QueuedGroup {
+            uint64_t sortKey = 0;
             uint32_t flags = 0;
             uint32_t texture = 0;
             GroupExtra extra;
@@ -355,6 +361,10 @@ namespace dx {
             bool visible = true;
             uint64_t issuedFrame = 0;
             uint64_t resultFrame = 0;
+            Vector losPawnLoc {};
+            Vector losViewLoc {};
+            uint64_t losFrame = 0;
+            bool losVisible = false;
         };
 
         struct View {
@@ -365,6 +375,8 @@ namespace dx {
             float fov = 90;
             float tanHalfWidth = 1;
             float tanHalfHeight = 1;
+            int32_t spanWidth = 0;
+            int32_t spanHeight = 0;
             uint64_t zoneMask = ~0ull;
             int32_t recursion = 0;
             bool mirrored = false;
@@ -419,6 +431,7 @@ namespace dx {
         uint64_t visibleZones(uint8_t zone) const;
         bool inFrustum(const View& view, const Vector& center, float radius) const;
         bool sphereReachesVisible(const View& view, const Vector& center, float radius, int32_t knownLeaf = -1);
+        bool actorOccludedBySpanTiles(UObject* actor, const View& view, int32_t knownLeaf) const;
         uint32_t litMask(const Vector& low, const Vector& high, bool specialLit) const;
         void addCorona(UObject* light, const Vector& origin, float delta, size_t& free, UObject* viewportActor);
         void drawCoronas(const View& view, int x, int y, int width, int height);
@@ -474,7 +487,6 @@ namespace dx {
         std::vector<uint8_t> scratchFog;
         std::vector<Vector> scratchFogLit;
         double coronaTime = -1;
-        std::unordered_map<UObject*, size_t> lightIndex;
         std::vector<UObject*> lightConsider;
         int32_t considerTag = 0;
         int32_t lightDelta = 0;

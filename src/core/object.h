@@ -110,6 +110,7 @@ namespace dx {
         Linker* linker = nullptr;
         int32_t exportRef = 0;
         int32_t collisionSlot = -1;
+        int32_t renderLightSlot = -1;
         bool loaded = true;
         bool destroyed = false;
         bool singular = false;

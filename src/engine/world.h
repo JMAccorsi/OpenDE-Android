@@ -107,6 +107,8 @@ namespace dx {
         float pendingSeconds = 0;
         double realTime = 0;
         uint32_t frame = 0;
+        Vector cachedPlayerLoc {};
+        bool hasCachedPlayerLoc = false;
         std::string url;
         std::string travelUrl;
         int32_t travelType = -1;

@@ -1066,7 +1066,13 @@ namespace dx {
             return false;
         }
         actor::bTicked(a) = tickParity;
-        if (a->hasClassBit(CLS_ScriptedPawn) && !deusex::scriptedPawnTick(*this, a, deltaSeconds)) {
+#ifdef __ANDROID__
+        if (hasCachedPlayerLoc && !actor::bStatic(a)) {
+            actor::DistanceFromPlayer(a) = (actor::Location(a) - cachedPlayerLoc).size();
+        }
+#endif
+        if (a->hasClassBit(CLS_ScriptedPawn) && scriptedpawn::bDisappear(a) && (timeSeconds - actor::LastRenderTime(a)) > 5.0f) {
+            destroy(a);
             return true;
         }
         if (inStasis(a)) {
@@ -1125,15 +1131,29 @@ namespace dx {
                     return true;
                 }
             } else if (a->hasClassBit(CLS_ScriptedPawn)
-                && pawn::Enemy(a) == nullptr && actor::Physics(a) == PHYS_Walking
-                && (timeSeconds - actor::LastRenderTime(a)) > 3.0f && actor::DistanceFromPlayer(a) > 1500.0f) {
-                if (((frame + a->handle) & 1u) != 0) {
-                    return true;
+                && pawn::Enemy(a) == nullptr
+                && (actor::Physics(a) == PHYS_Walking || actor::Physics(a) == PHYS_None)
+                && !pawn::bOnFire(a)
+                && scriptedpawn::BleedRate(a) <= 0.0f
+                && (timeSeconds - actor::LastRenderTime(a)) > 2.5f) {
+                const float dist = actor::DistanceFromPlayer(a);
+                if (dist > 2500.0f) {
+                    if (((frame + a->handle) & 3u) != 0) {
+                        return true;
+                    }
+                    deltaSeconds = std::min(deltaSeconds * 4.0f, 0.16f);
+                } else if (dist > 1400.0f) {
+                    if (((frame + a->handle) & 1u) != 0) {
+                        return true;
+                    }
+                    deltaSeconds = std::min(deltaSeconds * 2.0f, 0.12f);
                 }
-                deltaSeconds = std::min(deltaSeconds * 2.0f, 0.12f);
             }
         }
 #endif
+        if (a->hasClassBit(CLS_ScriptedPawn) && !deusex::scriptedPawnTick(*this, a, deltaSeconds)) {
+            return true;
+        }
 
         if (actor::Mesh(a)) {
             updateAnimation(a, deltaSeconds);
@@ -1337,14 +1357,26 @@ namespace dx {
         float tw0 = nowMs();
         paused = !levelinfo::Pauser(levelInfo).empty();
         collisionHash.sync(actors, firstDynamicActor);
-        if (localPlayer && !localPlayer->destroyed) {
-            Vector viewLocation = actor::Location(localPlayer);
+        hasCachedPlayerLoc = (localPlayer && !localPlayer->destroyed);
+        if (hasCachedPlayerLoc) {
+            cachedPlayerLoc = actor::Location(localPlayer);
+#ifdef __ANDROID__
+            if (frame <= 1) {
+                for (size_t i = firstDynamicActor; i < actors.size(); i++) {
+                    UObject* a = actors[i];
+                    if (a && !a->destroyed && !actor::bStatic(a)) {
+                        actor::DistanceFromPlayer(a) = (actor::Location(a) - cachedPlayerLoc).size();
+                    }
+                }
+            }
+#else
             for (size_t i = firstDynamicActor; i < actors.size(); i++) {
                 UObject* a = actors[i];
                 if (a && !a->destroyed && !actor::bStatic(a)) {
-                    actor::DistanceFromPlayer(a) = (actor::Location(a) - viewLocation).size();
+                    actor::DistanceFromPlayer(a) = (actor::Location(a) - cachedPlayerLoc).size();
                 }
             }
+#endif
         }
         float tw1 = nowMs();
         profSyncMs = tw1 - tw0;

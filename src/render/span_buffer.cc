@@ -45,10 +45,16 @@ namespace dx {
         const int32_t rowWords = (rowCount + 63) >> 6;
         rowOpenMask.assign(static_cast<size_t>(rowWords), 0ull);
         if (columns <= 0 || rowCount <= 0) {
+            tileCols = 0;
+            tileRows = 0;
+            tileCoverSeq.clear();
             openRows = 0;
             anyCovered = true;
             return;
         }
+        tileCols = (columns + 15) >> 4;
+        tileRows = (rowCount + 3) >> 2;
+        tileCoverSeq.assign(static_cast<size_t>(tileCols * tileRows), std::numeric_limits<int32_t>::max());
         const uint64_t lastMask = maskToInclusive((columns - 1) & 63);
         for (int32_t y = 0; y < rowCount; ++y) {
             uint64_t* rowBits = bits.data() + static_cast<size_t>(y * wordsPerRow);
@@ -74,6 +80,9 @@ namespace dx {
         bits.assign(static_cast<size_t>(rowCount * wordsPerRow), 0ull);
         rowOpen.assign(static_cast<size_t>(rowCount), 0u);
         rowOpenMask.assign(static_cast<size_t>((rowCount + 63) >> 6), 0ull);
+        tileCols = 0;
+        tileRows = 0;
+        tileCoverSeq.clear();
         openRows = 0;
         anyCovered = true;
         if (columns <= 0 || rowCount <= 0) {
@@ -186,6 +195,54 @@ namespace dx {
         return false;
     }
 
+    int32_t SpanBuffer::rectMaxCoverSeq(const std::vector<int32_t>& seq, int32_t tileCols, int32_t tileRows, int32_t columns, int32_t rowCount, int32_t x0, int32_t y0, int32_t x1, int32_t y1)
+    {
+        if (tileCols <= 0 || tileRows <= 0) {
+            return std::numeric_limits<int32_t>::max();
+        }
+        x0 = std::max(x0, 0);
+        x1 = std::min(x1, columns);
+        y0 = std::max(y0, 0);
+        y1 = std::min(y1, rowCount);
+        if (x0 >= x1 || y0 >= y1) {
+            return -1;
+        }
+        const int32_t tx0 = x0 >> 4;
+        const int32_t tx1 = (x1 - 1) >> 4;
+        const int32_t ty0 = y0 >> 2;
+        const int32_t ty1 = (y1 - 1) >> 2;
+        int32_t maxSeq = 0;
+        for (int32_t ty = ty0; ty <= ty1; ++ty) {
+            const int32_t* row = seq.data() + static_cast<size_t>(ty * tileCols);
+            for (int32_t tx = tx0; tx <= tx1; ++tx) {
+                const int32_t s = row[tx];
+                if (s == std::numeric_limits<int32_t>::max()) {
+                    return s;
+                }
+                if (s > maxSeq) {
+                    maxSeq = s;
+                }
+            }
+        }
+        return maxSeq;
+    }
+
+    int32_t SpanBuffer::rectMaxCoverSeq(int32_t x0, int32_t y0, int32_t x1, int32_t y1) const
+    {
+        return rectMaxCoverSeq(tileCoverSeq, tileCols, tileRows, columns, rowCount, x0, y0, x1, y1);
+    }
+
+    void SpanBuffer::exportTileCover(std::vector<int32_t>& outSeq, int32_t& outTileCols, int32_t& outTileRows, int32_t& outColumns, int32_t& outRowCount)
+    {
+        std::swap(outSeq, tileCoverSeq);
+        outTileCols = tileCols;
+        outTileRows = tileRows;
+        outColumns = columns;
+        outRowCount = rowCount;
+        tileCols = 0;
+        tileRows = 0;
+    }
+
     bool SpanBuffer::polygonVisible(const ScreenPoint* points, int32_t count, std::vector<ScreenSpan>* visible) const
     {
         if (count <= 0 || openRows <= 0) {
@@ -240,121 +297,133 @@ namespace dx {
             edge.slope = edge.flat ? 0.0f : (b.x - a.x) / (b.y - a.y);
         }
         bool found = false;
-        for (int32_t y = first; y < last; y++) {
-            if (!rowOpen[static_cast<size_t>(y)]) {
-                continue;
+        const int32_t rw0 = first >> 6;
+        const int32_t rw1 = (last - 1) >> 6;
+        const uint64_t rm0 = maskFrom(first & 63);
+        const uint64_t rm1 = maskToInclusive((last - 1) & 63);
+        for (int32_t rw = rw0; rw <= rw1; ++rw) {
+            uint64_t rword = rowOpenMask[static_cast<size_t>(rw)];
+            if (rw == rw0) {
+                rword &= rm0;
             }
-            const uint64_t* rowBits = bits.data() + static_cast<size_t>(y * wordsPerRow);
-            if (!rangeHasOpen(rowBits, polyX0, polyX1)) {
-                continue;
+            if (rw == rw1) {
+                rword &= rm1;
             }
-            float low = std::clamp(static_cast<float>(y), top, bottom);
-            float high = std::clamp(static_cast<float>(y + 1), top, bottom);
-            float left = std::numeric_limits<float>::max();
-            float right = std::numeric_limits<float>::lowest();
-            for (int32_t i = 0; i < edgeCount; i++) {
-                const PolyEdge& edge = edges[i];
-                if (edge.high < low || edge.low > high) {
+            while (rword) {
+                const int32_t y = (rw << 6) + std::countr_zero(rword);
+                rword &= rword - 1;
+                const uint64_t* rowBits = bits.data() + static_cast<size_t>(y * wordsPerRow);
+                if (!rangeHasOpen(rowBits, polyX0, polyX1)) {
                     continue;
                 }
-                if (edge.flat) {
-                    left = std::min(left, edge.minX);
-                    right = std::max(right, edge.maxX);
-                    continue;
-                }
-                float start = edge.aX + (std::max(low, edge.low) - edge.aY) * edge.slope;
-                float end = edge.aX + (std::min(high, edge.high) - edge.aY) * edge.slope;
-                if (start < end) {
-                    if (start < left) {
-                        left = start;
+                float low = std::clamp(static_cast<float>(y), top, bottom);
+                float high = std::clamp(static_cast<float>(y + 1), top, bottom);
+                float left = std::numeric_limits<float>::max();
+                float right = std::numeric_limits<float>::lowest();
+                for (int32_t i = 0; i < edgeCount; i++) {
+                    const PolyEdge& edge = edges[i];
+                    if (edge.high < low || edge.low > high) {
+                        continue;
                     }
-                    if (end > right) {
-                        right = end;
+                    if (edge.flat) {
+                        left = std::min(left, edge.minX);
+                        right = std::max(right, edge.maxX);
+                        continue;
                     }
-                } else {
-                    if (end < left) {
-                        left = end;
-                    }
-                    if (start > right) {
-                        right = start;
-                    }
-                }
-            }
-            if (left > right) {
-                continue;
-            }
-            int32_t x0 = std::max(static_cast<int32_t>(std::floor(left)) - 1, 0);
-            int32_t x1 = std::min(static_cast<int32_t>(std::ceil(right)) + 1, columns);
-            if (x0 >= x1) {
-                continue;
-            }
-            if (!visible) {
-                if (rangeHasOpen(rowBits, x0, x1)) {
-                    return true;
-                }
-                continue;
-            }
-            // Emit exact contiguous open runs within [x0, x1).
-            const int32_t w0 = x0 >> 6;
-            const int32_t w1 = (x1 - 1) >> 6;
-            const uint64_t m0 = maskFrom(x0 & 63);
-            const uint64_t m1 = maskToInclusive((x1 - 1) & 63);
-            int32_t runStart = -1;
-            for (int32_t w = w0; w <= w1; ++w) {
-                uint64_t word = rowBits[w];
-                if (w == w0) {
-                    word &= m0;
-                }
-                if (w == w1) {
-                    word &= m1;
-                }
-                if (word == ~0ull && w > w0 && w < w1) {
-                    if (runStart < 0) {
-                        runStart = w << 6;
-                    }
-                    continue;
-                }
-                if (word == 0ull) {
-                    if (runStart >= 0) {
-                        visible->push_back({ y, runStart, w << 6 });
-                        found = true;
-                        runStart = -1;
-                    }
-                    continue;
-                }
-                int32_t bit = 0;
-                const int32_t base = w << 6;
-                while (bit < 64) {
-                    uint64_t shifted = word >> static_cast<unsigned>(bit);
-                    if (runStart < 0) {
-                        if (shifted == 0ull) {
-                            break;
+                    float start = edge.aX + (std::max(low, edge.low) - edge.aY) * edge.slope;
+                    float end = edge.aX + (std::min(high, edge.high) - edge.aY) * edge.slope;
+                    if (start < end) {
+                        if (start < left) {
+                            left = start;
                         }
-                        int32_t zeros = std::countr_zero(shifted);
-                        bit += zeros;
-                        runStart = base + bit;
+                        if (end > right) {
+                            right = end;
+                        }
                     } else {
-                        uint64_t inv = ~shifted;
-                        if (inv == 0ull) {
-                            break;
+                        if (end < left) {
+                            left = end;
                         }
-                        int32_t ones = std::countr_zero(inv);
-                        bit += ones;
-                        visible->push_back({ y, runStart, base + bit });
-                        found = true;
-                        runStart = -1;
+                        if (start > right) {
+                            right = start;
+                        }
                     }
                 }
-            }
-            if (runStart >= 0) {
-                visible->push_back({ y, runStart, x1 });
-                found = true;
+                if (left > right) {
+                    continue;
+                }
+                int32_t x0 = std::max(static_cast<int32_t>(std::floor(left)) - 1, 0);
+                int32_t x1 = std::min(static_cast<int32_t>(std::ceil(right)) + 1, columns);
+                if (x0 >= x1) {
+                    continue;
+                }
+                if (!visible) {
+                    if (rangeHasOpen(rowBits, x0, x1)) {
+                        return true;
+                    }
+                    continue;
+                }
+                // Emit exact contiguous open runs within [x0, x1).
+                const int32_t w0 = x0 >> 6;
+                const int32_t w1 = (x1 - 1) >> 6;
+                const uint64_t m0 = maskFrom(x0 & 63);
+                const uint64_t m1 = maskToInclusive((x1 - 1) & 63);
+                int32_t runStart = -1;
+                for (int32_t w = w0; w <= w1; ++w) {
+                    uint64_t word = rowBits[w];
+                    if (w == w0) {
+                        word &= m0;
+                    }
+                    if (w == w1) {
+                        word &= m1;
+                    }
+                    if (word == ~0ull && w > w0 && w < w1) {
+                        if (runStart < 0) {
+                            runStart = w << 6;
+                        }
+                        continue;
+                    }
+                    if (word == 0ull) {
+                        if (runStart >= 0) {
+                            visible->push_back({ y, runStart, w << 6 });
+                            found = true;
+                            runStart = -1;
+                        }
+                        continue;
+                    }
+                    int32_t bit = 0;
+                    const int32_t base = w << 6;
+                    while (bit < 64) {
+                        uint64_t shifted = word >> static_cast<unsigned>(bit);
+                        if (runStart < 0) {
+                            if (shifted == 0ull) {
+                                break;
+                            }
+                            int32_t zeros = std::countr_zero(shifted);
+                            bit += zeros;
+                            runStart = base + bit;
+                        } else {
+                            uint64_t inv = ~shifted;
+                            if (inv == 0ull) {
+                                break;
+                            }
+                            int32_t ones = std::countr_zero(inv);
+                            bit += ones;
+                            visible->push_back({ y, runStart, base + bit });
+                            found = true;
+                            runStart = -1;
+                        }
+                    }
+                }
+                if (runStart >= 0) {
+                    visible->push_back({ y, runStart, x1 });
+                    found = true;
+                }
             }
         }
         return found;
     }
 
-    void SpanBuffer::occlude(const ScreenPoint* points, int32_t count)
+    void SpanBuffer::occlude(const ScreenPoint* points, int32_t count, int32_t coverSeq)
     {
         if (count <= 0 || openRows <= 0) {
             return;
@@ -393,38 +462,50 @@ namespace dx {
             }
             edges[activeEdges++] = { lower.x, lower.y, upper.y, (upper.x - lower.x) / (upper.y - lower.y) };
         }
-        for (int32_t y = first; y < last; y++) {
-            if (!rowOpen[static_cast<size_t>(y)]) {
-                continue;
+        const int32_t rw0 = first >> 6;
+        const int32_t rw1 = (last - 1) >> 6;
+        const uint64_t rm0 = maskFrom(first & 63);
+        const uint64_t rm1 = maskToInclusive((last - 1) & 63);
+        for (int32_t rw = rw0; rw <= rw1; ++rw) {
+            uint64_t rword = rowOpenMask[static_cast<size_t>(rw)];
+            if (rw == rw0) {
+                rword &= rm0;
             }
-            const uint64_t* rowBits = bits.data() + static_cast<size_t>(y * wordsPerRow);
-            if (!rangeHasOpen(rowBits, polyX0, polyX1)) {
-                continue;
+            if (rw == rw1) {
+                rword &= rm1;
             }
-            float center = static_cast<float>(y) + 0.5f;
-            float left = std::numeric_limits<float>::max();
-            float right = std::numeric_limits<float>::lowest();
-            for (int32_t i = 0; i < activeEdges; i++) {
-                const OccludeEdge& edge = edges[i];
-                if (center < edge.lowerY || center >= edge.upperY) {
+            while (rword) {
+                const int32_t y = (rw << 6) + std::countr_zero(rword);
+                rword &= rword - 1;
+                const uint64_t* rowBits = bits.data() + static_cast<size_t>(y * wordsPerRow);
+                if (!rangeHasOpen(rowBits, polyX0, polyX1)) {
                     continue;
                 }
-                float x = edge.lowerX + (center - edge.lowerY) * edge.slope;
-                left = std::min(left, x);
-                right = std::max(right, x);
-            }
-            if (left > right) {
-                continue;
-            }
-            int32_t x0 = std::max(static_cast<int32_t>(std::ceil(left - 0.5f)), 0);
-            int32_t x1 = std::min(static_cast<int32_t>(std::ceil(right - 0.5f)), columns);
-            if (x0 < x1) {
-                cover(y, x0, x1);
+                float center = static_cast<float>(y) + 0.5f;
+                float left = std::numeric_limits<float>::max();
+                float right = std::numeric_limits<float>::lowest();
+                for (int32_t i = 0; i < activeEdges; i++) {
+                    const OccludeEdge& edge = edges[i];
+                    if (center < edge.lowerY || center >= edge.upperY) {
+                        continue;
+                    }
+                    float x = edge.lowerX + (center - edge.lowerY) * edge.slope;
+                    left = std::min(left, x);
+                    right = std::max(right, x);
+                }
+                if (left > right) {
+                    continue;
+                }
+                int32_t x0 = std::max(static_cast<int32_t>(std::ceil(left - 0.5f)), 0);
+                int32_t x1 = std::min(static_cast<int32_t>(std::ceil(right - 0.5f)), columns);
+                if (x0 < x1) {
+                    cover(y, x0, x1, coverSeq);
+                }
             }
         }
     }
 
-    void SpanBuffer::cover(int32_t y, int32_t x0, int32_t x1)
+    void SpanBuffer::cover(int32_t y, int32_t x0, int32_t x1, int32_t coverSeq)
     {
         if (!rowOpen[static_cast<size_t>(y)]) {
             return;
@@ -444,9 +525,37 @@ namespace dx {
             }
             rowBits[w1] &= ~m1;
         }
+        if (tileCols > 0 && coverSeq < std::numeric_limits<int32_t>::max()) {
+            const int32_t ty = y >> 2;
+            const int32_t tx0 = x0 >> 4;
+            const int32_t tx1 = (x1 - 1) >> 4;
+            const int32_t ry0 = ty << 2;
+            const int32_t ry1 = std::min(ry0 + 4, rowCount);
+            for (int32_t tx = tx0; tx <= tx1; ++tx) {
+                const unsigned shift = static_cast<unsigned>((tx & 3) << 4);
+                if (static_cast<uint16_t>(rowBits[tx >> 2] >> shift) != 0u) {
+                    continue;
+                }
+                int32_t& slot = tileCoverSeq[static_cast<size_t>(ty * tileCols + tx)];
+                if (slot != std::numeric_limits<int32_t>::max()) {
+                    continue;
+                }
+                uint16_t any16 = 0u;
+                for (int32_t ry = ry0; ry < ry1; ++ry) {
+                    any16 |= static_cast<uint16_t>(bits[static_cast<size_t>(ry * wordsPerRow + (tx >> 2))] >> shift);
+                }
+                if (any16 == 0u) {
+                    slot = coverSeq;
+                }
+            }
+        }
         uint64_t any = 0ull;
-        for (int32_t w = 0; w < wordsPerRow; ++w) {
-            any |= rowBits[w];
+        if (wordsPerRow == 4) {
+            any = rowBits[0] | rowBits[1] | rowBits[2] | rowBits[3];
+        } else {
+            for (int32_t w = 0; w < wordsPerRow; ++w) {
+                any |= rowBits[w];
+            }
         }
         if (any == 0ull) {
             rowOpen[static_cast<size_t>(y)] = 0u;

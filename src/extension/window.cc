@@ -677,7 +677,7 @@ namespace dx::extension {
             float parentWidth = owner->width();
             float parentHeight = owner->height();
             bool parentIsRoot = owner == state().root;
-            float rootWidth = extendedVirtualWidth();
+            float rootWidth = parentIsRoot ? extendedVirtualWidth() : 0.0f;
             if (halign == HALIGN_Full || valign == VALIGN_Full) {
                 float newWidth = width();
                 float newHeight = height();
@@ -1465,32 +1465,34 @@ namespace dx::extension {
         if (destroyed) {
             return;
         }
-        std::vector<int32_t> expired;
-        for (auto& [id, timer] : timers) {
-            timer.left -= deltaSeconds;
-            if (timer.left <= 0) {
-                expired.push_back(id);
+        if (!timers.empty()) {
+            std::vector<int32_t> expired;
+            for (auto& [id, timer] : timers) {
+                timer.left -= deltaSeconds;
+                if (timer.left <= 0) {
+                    expired.push_back(id);
+                }
             }
-        }
-        for (int32_t id : expired) {
-            auto it = timers.find(id);
-            if (it == timers.end()) {
-                continue;
-            }
-            Name function = it->second.function;
-            int32_t clientData = it->second.clientData;
-            if (it->second.loop && it->second.timeout > 0.0001f) {
-                it->second.left = std::max(it->second.left + it->second.timeout, 0.0f);
-            } else {
-                timers.erase(it);
-            }
-            vm::Call call(this, function);
-            if (call.valid()) {
-                call.i(clientData);
-                call.run();
-            }
-            if (destroyed) {
-                return;
+            for (int32_t id : expired) {
+                auto it = timers.find(id);
+                if (it == timers.end()) {
+                    continue;
+                }
+                Name function = it->second.function;
+                int32_t clientData = it->second.clientData;
+                if (it->second.loop && it->second.timeout > 0.0001f) {
+                    it->second.left = std::max(it->second.left + it->second.timeout, 0.0f);
+                } else {
+                    timers.erase(it);
+                }
+                vm::Call call(this, function);
+                if (call.valid()) {
+                    call.i(clientData);
+                    call.run();
+                }
+                if (destroyed) {
+                    return;
+                }
             }
         }
         UWindow* child = firstChild();
