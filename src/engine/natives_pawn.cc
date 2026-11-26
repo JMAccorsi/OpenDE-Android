@@ -1720,7 +1720,7 @@ namespace dx {
             return 0;
         }
 
-        bool directionReachable(UObject* self, const Vector& focus, int32_t yaw, int32_t pitch, float minDist, float maxDist, Vector* bestDest)
+        bool directionReachable(UObject* self, Vector focus, int32_t yaw, int32_t pitch, float minDist, float maxDist, Vector* bestDest)
         {
             float minimumSquared = minDist * minDist;
             float maximumSquared = maxDist * maxDist;

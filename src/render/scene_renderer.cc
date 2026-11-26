@@ -1735,16 +1735,20 @@ namespace dx {
                     continue;
                 }
                 std::sort(ranges.begin(), ranges.end());
-                const bool singleSided = (batch.polyFlags & PF_TwoSided) == 0;
+                const bool singleSided = (batch.polyFlags & (PF_TwoSided | PF_Mirrored)) == 0;
                 const std::vector<GLVertex>& verts = levelData.vertices;
                 for (const auto& [first, count, node] : ranges) {
-                    if (singleSided && count >= 3 && static_cast<size_t>(first + 2) < verts.size()) {
+                    if (singleSided && count >= 3 && static_cast<size_t>(first + count) <= verts.size()) {
+                        Vector n { 0.0f, 0.0f, 0.0f };
                         const Vector v0 { verts[static_cast<size_t>(first)].x, verts[static_cast<size_t>(first)].y, verts[static_cast<size_t>(first)].z };
-                        const Vector v1 { verts[static_cast<size_t>(first + 1)].x, verts[static_cast<size_t>(first + 1)].y, verts[static_cast<size_t>(first + 1)].z };
-                        const Vector v2 { verts[static_cast<size_t>(first + 2)].x, verts[static_cast<size_t>(first + 2)].y, verts[static_cast<size_t>(first + 2)].z };
-                        const Vector n = (v1 - v0).cross(v2 - v0);
+                        for (int32_t i = 0; i + 2 < count; i += 3) {
+                            const Vector a { verts[static_cast<size_t>(first + i)].x, verts[static_cast<size_t>(first + i)].y, verts[static_cast<size_t>(first + i)].z };
+                            const Vector b { verts[static_cast<size_t>(first + i + 1)].x, verts[static_cast<size_t>(first + i + 1)].y, verts[static_cast<size_t>(first + i + 1)].z };
+                            const Vector c { verts[static_cast<size_t>(first + i + 2)].x, verts[static_cast<size_t>(first + i + 2)].y, verts[static_cast<size_t>(first + i + 2)].z };
+                            n += (b - a).cross(c - a);
+                        }
                         const float nLenSq = n.sizeSquared();
-                        if (nLenSq > 1e-6f) {
+                        if (nLenSq > 1.0f) {
                             const float d = n.dot(view.location - v0);
                             if (d < 0.0f && d * d > nLenSq) {
                                 continue;
@@ -1782,6 +1786,7 @@ namespace dx {
             device->setBlend(BlendMode::Opaque);
             device->setFlags(0);
             device->setColorWrite(false);
+            device->setPolygonOffset(true, 1.0f, 1.0f);
             for (int32_t index : touchedBatches) {
                 const Batch& batch = levelData.batches[static_cast<size_t>(index)];
                 if (!(batch.polyFlags & PF_Mirrored) || !(view.zoneMask & (1ull << (batch.zone & 63)))) {
@@ -1795,6 +1800,7 @@ namespace dx {
                 collectRanges(index);
                 device->drawStaticRanges(levelData.vao, scratchFirsts.data(), scratchCounts.data(), static_cast<int32_t>(scratchFirsts.size()));
             }
+            device->setPolygonOffset(false, 0.0f, 0.0f);
             device->setColorWrite(true);
         }
 #ifdef __ANDROID__
@@ -2016,6 +2022,7 @@ namespace dx {
         };
         device->useShader();
         applyClip(view);
+        drawMoverMirrorDepth(view);
         float t0 = nowMs();
         bool asyncCandidates = false;
         if (view.recursion == 0 && levelData.vao) {
@@ -2107,7 +2114,11 @@ namespace dx {
         device->setDepthRange(1.0f, 1.0f);
         device->setCulling(false);
         device->setColorWrite(false);
-        device->drawStatic(levelData.mirrorVao, mirror.first, mirror.count);
+        if (mirror.vertices.empty()) {
+            device->drawStatic(levelData.mirrorVao, mirror.first, mirror.count);
+        } else {
+            device->draw(mirror.vertices, Primitive::Triangles);
+        }
         device->setColorWrite(true);
         device->setDepthRange(0.0f, 1.0f);
         device->setDepthFunc(DepthFunc::LessEqual);
@@ -2115,14 +2126,18 @@ namespace dx {
 
     bool SceneRenderer::drawMirrors(const View& view, const std::vector<UObject*>& actors)
     {
-        if (view.recursion >= MaxFrameRecursion - 1 || !levelData.mirrorVao) {
+        if (view.recursion >= MaxFrameRecursion - 1) {
             return false;
         }
         bool drewAny = false;
-        for (size_t mirrorIndex = 0; mirrorIndex < levelData.mirrors.size(); mirrorIndex++) {
-            const MirrorSurface& mirror = levelData.mirrors[mirrorIndex];
-            const std::vector<ScreenSpan>& open = view.visibility->mirrorSpans[mirrorIndex];
-            if (open.empty() || !(view.zoneMask & (1ull << (mirror.zone & 63)))) {
+        for (size_t mirrorIndex = 0; mirrorIndex < levelData.mirrors.size() + moverMirrors.size(); mirrorIndex++) {
+            bool moving = mirrorIndex >= levelData.mirrors.size();
+            const MirrorSurface& mirror = moving ? moverMirrors[mirrorIndex - levelData.mirrors.size()] : levelData.mirrors[mirrorIndex];
+            const std::vector<ScreenSpan>* open = moving ? nullptr : &view.visibility->mirrorSpans[mirrorIndex];
+            if (moving ? !inFrustum(view, mirror.center, mirror.radius) : open->empty()) {
+                continue;
+            }
+            if (!(view.zoneMask & (1ull << (mirror.zone & 63)))) {
                 continue;
             }
             float side = mirror.normal.dot(view.location) - mirror.distance;
@@ -2184,7 +2199,7 @@ namespace dx {
             child.cullPlanes = pyramid(mirror.hull);
             child.cullPlanes.push_back(child.clipPlanes[0]);
             child.portal = mirror.hull;
-            occludeView(child, &open);
+            occludeView(child, open);
             drawMirrors(child, actors);
             if (levelData.hasBackdrop && child.visibility && !child.visibility->backdropSpans.empty()) {
                 markMirror(view, mirror);
@@ -2195,6 +2210,88 @@ namespace dx {
             drewAny = true;
         }
         return drewAny;
+    }
+
+    void SceneRenderer::collectMoverMirrors(const std::vector<UObject*>& actors)
+    {
+        moverMirrors.clear();
+        for (UObject* actor : actors) {
+            if (!actor || actor->destroyed) {
+                continue;
+            }
+            objects::ensureLoaded(actor);
+            if (!actor->data || !actor->hasClassBit(CLS_Mover) || actor::DrawType(actor) != DT_Brush || actor::bHidden(actor)) {
+                continue;
+            }
+            UModel* brush = cast<UModel>(actor::Brush(actor));
+            if (!brush) {
+                continue;
+            }
+            objects::ensureLoaded(brush);
+            if (!brush->polys) {
+                continue;
+            }
+            objects::ensureLoaded(brush->polys);
+            LightmapTransform transform;
+            transform.identity = false;
+            transform.location = actor::Location(actor);
+            transform.rotation = rotationAxes(actor::Rotation(actor));
+            transform.scale = scaleOf(brush::MainScale(actor));
+            transform.prePivot = actor::PrePivot(actor);
+            for (const Poly& poly : brush->polys->polys) {
+                uint32_t flags = poly.polyFlags | textureFlags(asTexture(poly.texture));
+                if (!(flags & PF_Mirrored) || (flags & (PF_Invisible | PF_Portal)) || poly.vertices.size() < 3) {
+                    continue;
+                }
+                MirrorSurface mirror;
+                mirror.normal = transform.direction(poly.normal).normal();
+                mirror.polyFlags = flags;
+                for (const Vector& point : poly.vertices) {
+                    mirror.hull.push_back(transform.point(point));
+                    mirror.center += mirror.hull.back();
+                }
+                mirror.center = mirror.center / static_cast<float>(mirror.hull.size());
+                mirror.distance = mirror.normal.dot(mirror.hull[0]);
+                for (const Vector& point : mirror.hull) {
+                    mirror.radius = std::max(mirror.radius, (point - mirror.center).size());
+                }
+                mirror.zone = pointZone(mirror.center + mirror.normal * 2.0f);
+                for (size_t i = 1; i + 1 < mirror.hull.size(); i++) {
+                    for (const Vector& point : { mirror.hull[0], mirror.hull[i], mirror.hull[i + 1] }) {
+                        GLVertex vertex;
+                        vertex.x = point.x;
+                        vertex.y = point.y;
+                        vertex.z = point.z;
+                        mirror.vertices.push_back(vertex);
+                    }
+                }
+                moverMirrors.push_back(std::move(mirror));
+            }
+        }
+    }
+
+    void SceneRenderer::drawMoverMirrorDepth(const View& view)
+    {
+        if (moverMirrors.empty() || view.recursion >= MaxFrameRecursion - 1) {
+            return;
+        }
+        device->setViewProj(view.viewProj);
+        device->setBlend(BlendMode::Opaque);
+        device->setFlags(0);
+        device->setDepthTest(true);
+        device->setDepthFunc(DepthFunc::LessEqual);
+        device->setFrontFace(!view.mirrored);
+        device->setColorWrite(false);
+        device->setPolygonOffset(true, 1.0f, 1.0f);
+        for (const MirrorSurface& mirror : moverMirrors) {
+            if (!(view.zoneMask & (1ull << (mirror.zone & 63)))) {
+                continue;
+            }
+            device->setCulling(!(mirror.polyFlags & PF_TwoSided));
+            device->draw(mirror.vertices, Primitive::Triangles);
+        }
+        device->setPolygonOffset(false, 0.0f, 0.0f);
+        device->setColorWrite(true);
     }
 
     void SceneRenderer::collectVolumetrics(const View& view)
@@ -4832,6 +4929,7 @@ namespace dx {
             }
         }
         view.fog = true;
+        collectMoverMirrors(actors);
         if (!wireframe) {
             float lightsAsyncMs = 0.0f;
             worker.run([this, &actors, location, &lightsAsyncMs]() {
@@ -4871,7 +4969,7 @@ namespace dx {
                 frameStats.skyMs = nowMs() - ts0;
             }
         }
-        if (!levelData.mirrors.empty() && !wireframe && view.visibility) {
+        if ((!levelData.mirrors.empty() || !moverMirrors.empty()) && !wireframe && view.visibility) {
             if (drawMirrors(view, actors)) {
                 device->setDepthWrite(true);
                 device->clear(false, true, 1.0f);

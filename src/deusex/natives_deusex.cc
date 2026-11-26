@@ -1260,9 +1260,44 @@ namespace dx {
             }
         }
 
+        void shatterMirrorsIntoGlass(World& world)
+        {
+            constexpr uint32_t PF_Mirrored = 0x08000000;
+            UClass* moverClass = objects::findClass("DeusEx.DeusExMover");
+            UClass* woodClass = objects::findClass("DeusEx.WoodFragment");
+            UClass* glassClass = objects::findClass("DeusEx.GlassFragment");
+            if (!moverClass || !woodClass || !glassClass) {
+                return;
+            }
+            for (UObject* a : world.actors) {
+                if (!a || a->destroyed || !a->isA(moverClass) || !deusexmover::bBreakable(a) || deusexmover::FragmentClass(a) != woodClass) {
+                    continue;
+                }
+                UModel* brush = cast<UModel>(actor::Brush(a));
+                if (!brush) {
+                    continue;
+                }
+                objects::ensureLoaded(brush);
+                if (!brush->polys) {
+                    continue;
+                }
+                objects::ensureLoaded(brush->polys);
+                bool mirrored = std::any_of(brush->polys->polys.begin(), brush->polys->polys.end(), [](const Poly& poly) {
+                    return (poly.polyFlags & PF_Mirrored) != 0;
+                });
+                if (!mirrored) {
+                    continue;
+                }
+                deusexmover::FragmentClass(a) = glassClass;
+                deusexmover::ExplodeSound1(a) = objects::loadObject("DeusExSounds.Generic.GlassBreakLarge", nullptr);
+                deusexmover::ExplodeSound2(a) = objects::loadObject("DeusExSounds.Generic.GlassBreakSmall", nullptr);
+            }
+        }
+
         void levelLoaded(World& world)
         {
             applyVanillaFixes();
+            shatterMirrorsIntoGlass(world);
             alignCrosshair();
             scaleScopeView();
             DeusExState& s = state();

@@ -1093,29 +1093,41 @@ namespace dx {
                     deltaSeconds = std::min(deltaSeconds * 4.0f, 0.16f);
                 }
             } else if (owner && !owner->destroyed && owner != localPlayer) {
-                const float ownerUnseen = timeSeconds - actor::LastRenderTime(owner);
-                const float ownerDist = actor::DistanceFromPlayer(owner);
-                if (a->hasClassBit(CLS_Decal) && ownerUnseen > 1.0f && ownerDist > 800.0f) {
-                    return true;
+                bool playerOwned = false;
+                UObject* ancestor = owner;
+                for (int depth = 0; depth < 4 && ancestor && !ancestor->destroyed; depth++) {
+                    if (ancestor == localPlayer) {
+                        playerOwned = true;
+                        break;
+                    }
+                    ancestor = actor::Owner(ancestor);
                 }
-                if (a->hasClassBit(CLS_Inventory) && actor::Physics(a) == PHYS_None
-                    && ownerUnseen > 1.0f && ownerDist > 600.0f
-                    && (!owner->hasClassBit(CLS_Pawn) || pawn::Enemy(owner) == nullptr)
-                    && (!a->stateFrame || a->stateFrame->latentAction == 0)) {
-                    const float tr = actor::TimerRate(a);
-                    if (tr <= 0.0f) {
+                if (!playerOwned) {
+                    const float ownerUnseen = timeSeconds - actor::LastRenderTime(owner);
+                    const float ownerDist = actor::DistanceFromPlayer(owner);
+                    if (a->hasClassBit(CLS_Decal) && ownerUnseen > 1.0f && ownerDist > 800.0f) {
                         return true;
                     }
-                    float& tc = actor::TimerCounter(a);
-                    if (tc + deltaSeconds < tr) {
-                        tc += deltaSeconds;
+                    if (a->hasClassBit(CLS_Inventory) && actor::Physics(a) == PHYS_None
+                        && ownerUnseen > 1.0f && ownerDist > 600.0f
+                        && (!owner->hasClassBit(CLS_Pawn) || pawn::Enemy(owner) == nullptr)
+                        && (!a->stateFrame || a->stateFrame->latentAction == 0)) {
+                        const float tr = actor::TimerRate(a);
+                        if (tr <= 0.0f) {
+                            return true;
+                        }
+                        float& tc = actor::TimerCounter(a);
+                        if (tc + deltaSeconds < tr) {
+                            tc += deltaSeconds;
+                            return true;
+                        }
+                    }
+                    if (actor::bHidden(a) && actor::Physics(a) == PHYS_None && actor::TimerRate(a) <= 0.0f
+                        && actor::LightType(a) == 0
+                        && (!a->stateFrame || a->stateFrame->latentAction == 0)
+                        && ownerUnseen > 1.5f && ownerDist > 900.0f) {
                         return true;
                     }
-                }
-                if (actor::bHidden(a) && actor::Physics(a) == PHYS_None && actor::TimerRate(a) <= 0.0f
-                    && (!a->stateFrame || a->stateFrame->latentAction == 0)
-                    && ownerUnseen > 1.5f && ownerDist > 900.0f) {
-                    return true;
                 }
             } else if (!owner && a->hasClassBit(CLS_Inventory)
                 && actor::Physics(a) == PHYS_None

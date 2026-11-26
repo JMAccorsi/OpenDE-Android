@@ -47,6 +47,7 @@ out mediump vec4 vColor;
 out vec3 vWorld;
 out mediump vec3 vNormal;
 out mediump vec3 vFog;
+invariant gl_Position;
 void main()
 {
     vFog = aFog;
@@ -101,9 +102,9 @@ uniform sampler2D uLightmap;
 uniform int uFlags;
 uniform vec4 uTint;
 uniform int uLightCount;
-uniform vec4 uLightPosition[8];
-uniform vec4 uLightColor[8];
-uniform vec4 uLightDirection[8];
+uniform vec4 uLightPosition[32];
+uniform vec4 uLightColor[32];
+uniform vec4 uLightDirection[32];
 uniform float uOcclusion;
 uniform float uGamma;
 layout(location = 0) out vec4 fragColor;
