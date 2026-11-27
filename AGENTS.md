@@ -16,28 +16,30 @@
 - **Never commit, tag, or push** until the user explicitly asks.
 - Publish GitHub releases as **Pre-release** until the user explicitly approves `v1.1`.
 
-## 3. Windows, PowerShell 5.1 & ADB Conventions
+## 3. Windows, PowerShell 5.1, ADB & Token Efficiency
 - **PowerShell 5.1:** Never use `&&` (unsupported). Chain dependent commands with `; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`.
-- **Binary PNG screenshots via ADB:** Never redirect `adb exec-out screencap -p` directly in PowerShell (`>` corrupts binary as UTF-16). Always wrap in `cmd /c`:
-  ```powershell
-  cmd /c "adb -s <serial> exec-out screencap -p > C:\path\to\shot.png"
-  ```
-- **Visual verification:** Always inspect captured screenshots via `read_file` on real hardware when debugging graphics/UI issues.
+- **Helper script (`scripts/android-dev.ps1`) — ALWAYS PREFER THIS to save turns and output tokens:**
+  - Quiet debug build (+ install/launch):
+    ```powershell
+    powershell -ExecutionPolicy Bypass -File C:\Users\Accorsi\.gemini\antigravity\scratch\OpenDE-Android\scripts\android-dev.ps1 debug -Install -Launch
+    ```
+  - Quiet OTA-signed release build (auto-verifies `debug.keystore` SHA-256):
+    ```powershell
+    powershell -ExecutionPolicy Bypass -File C:\Users\Accorsi\.gemini\antigravity\scratch\OpenDE-Android\scripts\android-dev.ps1 release -Version v0.6.3
+    ```
+  - Downscaled (`960×540`) or cropped ADB screenshot (75% fewer vision tokens; pass `-Full` only for 1-pixel Z-fighting checks, or `-Crop x,y,w,h`):
+    ```powershell
+    powershell -ExecutionPolicy Bypass -File C:\Users\Accorsi\.gemini\antigravity\scratch\OpenDE-Android\scripts\android-dev.ps1 shot -Out C:\path\to\shot.png
+    ```
+- **If running Gradle directly:** Always pass `-q --console=plain` to suppress verbose task logs.
+- **If running `screencap` directly:** Never redirect `adb exec-out screencap -p` in PowerShell (`>` corrupts binary as UTF-16); always wrap in `cmd /c`.
+- **Visual verification:** Inspect captured screenshots via `read_file` on real hardware when debugging graphics/UI issues, preferring half-res (`shot` default) or `-Crop` to keep conversation context compact.
 - **Test Devices:**
   - **Retroid (Adreno):** serial `MC94528AYF122800013` — `Adreno (TM) 22`, OpenGL ES 3.2, `1920×1080` (up to `120 FPS`).
   - **Samsung Galaxy A06 (Mali):** serial `R9XX901F43T` — Helio G85 / `Mali-G52 MC2`, `1600×720` (primary low/mid-range optimization target).
 
 ## 4. Build, Signing & OTA Release Rules
-- **Debug build (uses Release CMake flags `-O3 -DNDEBUG -ffast-math -flto=thin` + `-Werror`):**
-  ```powershell
-  cd C:\Users\Accorsi\.gemini\antigravity\scratch\OpenDE-Android\android
-  .\gradlew.bat assembleDebug
-  ```
-- **Install & launch:**
-  ```powershell
-  adb -s MC94528AYF122800013 install -r app\build\outputs\apk\debug\app-debug.apk
-  adb -s MC94528AYF122800013 shell am start -n com.opende.deusex/com.opende.deusex.OpenDEActivity
-  ```
+- **Debug / Release builds:** Use `scripts/android-dev.ps1 debug -Install -Launch` or `scripts/android-dev.ps1 release -Version vX.Y.Z` (both use `-q --console=plain` and Release CMake flags `-O3 -DNDEBUG -ffast-math -flto=thin` + `-Werror`).
 - **CRITICAL — Release Signing Key (OTA Compatibility):**
   - Always sign GitHub release APKs with `$env:USERPROFILE\.android\debug.keystore` (`--ks-pass pass:android --ks-key-alias androiddebugkey`), **NOT** `android/opende-release.jks`.
   - Required certificate SHA-256: `f4386ba9642d015cc2d2bfaa2ebe76d682b9c068444e5008b0ad426b0118104f`.
@@ -51,7 +53,9 @@ When porting upstream `jarmitage99/OpenDE` commits, preserve these Android fork 
 - **Visual fidelity rule:** Optimizations must maintain original graphical fidelity (no visual shortcuts that degrade the look).
 - **`GLVertex` packing:** Packed to 40 bytes (`uint8_t` normalized color/fog, `int8_t` normalized normal, `mediump` varyings).
 - **Streaming & batching:** 3-slot VBO/EBO ring buffers, direct mapped VBO uploads, single-map EBO upload for opaque BSP passes on Android, batched decals/brushes/translucent draws.
-- **Shader state caching (`src/render/gl_shader.cc`):** Per-program `dirtyMask`, culling cache, and `UberShader::activeGamma()` which bypasses gamma (`1.0f`) **only** for `BlendMode::Modulated` — `BlendMode::Translucent` **must** apply `state.gamma` so dark translucent surfaces (like `drtywater_a`) match desktop OpenDE and `DeusEx.exe`.
+- **Shader state caching (`src/render/gl_shader.cc`):**
+  - Per-program `dirtyMask`, culling cache, and `UberShader::activeGamma()` which bypasses gamma (`1.0f`) **only** for `BlendMode::Modulated` — `BlendMode::Translucent` **must** apply `state.gamma` so dark translucent surfaces (like `drtywater_a`) match desktop OpenDE and `DeusEx.exe`.
+  - **PowerVR MRT guard (`MRT_OCCLUSION`, #15):** Keep `layout(location = 1) out vec4 occlusionMask;` gated behind `#ifdef MRT_OCCLUSION` (programs `6..11`), enabled **only** between `beginOcclusion()` and `endOcclusion()` when the 2-attachment SSAO FBO is bound. Drawing to single-buffer `FBO 0` with `location = 1` declared causes PowerVR Rogue GPUs (e.g. GE8320) to overwrite `fragColor` with `uOcclusion`.
 - **Mirrors (`src/render/scene_renderer.cc`):**
   - `#ifdef __ANDROID__` uses `MaxFrameRecursion = 2` (desktop: `4`).
   - `SceneRenderer::drawMirrors` returns `bool` (`drewAny`) so `drawScene` only clears depth when a mirror actually rendered.
