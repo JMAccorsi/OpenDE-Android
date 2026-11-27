@@ -1,6 +1,7 @@
 #include "launcher/opende_launcher.h"
 
 #include "core/config.h"
+#include "game/rumble.h"
 
 #include <SDL3/SDL.h>
 #include <SDL3_ttf/SDL_ttf.h>
@@ -2368,7 +2369,7 @@ namespace game {
             if (chosenPart != st.padChosenPart) {
                 st.padChosenPart = chosenPart;
                 if (g && chosenPart >= 0) {
-                    SDL_RumbleGamepad(g, 0x2000, 0x4000, 70);
+                    game::rumbleLauncherTest(g, 0.14f, 0.28f, 70);
                 }
             }
 
@@ -2427,7 +2428,7 @@ namespace game {
             std::string audSec = audioSection();
 
             // Each tab declares rows dynamically using a small lambda helper inside a fixed-count dxl_list
-            const int rowCounts[] = { 12, 6, 6, 8, 8, 12, 3 };
+            const int rowCounts[] = { 12, 6, 6, 13, 8, 12, 3 };
             int count = rowCounts[std::clamp(st.settingsTab, 0, kTabCount - 1)];
 
             dxl_list list {};
@@ -2637,6 +2638,8 @@ namespace game {
                 static const char* const opacLabels[] = { "25%", "40%", "55%", "75%", "95%" };
                 static const char* const sizeLabels[] = { "75%", "100%", "125%", "150%" };
                 static const char* const sensLabels[] = { "0.5x", "0.75x", "1.0x", "1.5x", "2.0x" };
+                static const char* const compassEn[] = { "Goals / Notes", "Images" };
+                static const char* const compassPt[] = { "Objetivos / Notas", "Imagens" };
                 static const char* const gyroModeEn[] = { "Off", "Always On", "Aim / Scope" };
                 static const char* const gyroModePt[] = { "Desl.", "Sempre Lig.", "Ao Mirar" };
                 static const char* const gyroSens[] = { "0.5x", "0.75x", "1.0x", "1.5x", "2.0x", "3.0x" };
@@ -2655,17 +2658,41 @@ namespace game {
                 doSpinner(3, tr("Touch Look Speed", "Sensib. Câmera Touch"), tr("Drag-to-look sensitivity.", "Velocidade da câmera por toque."), readSysInt(vidSec.c_str(), "TouchLookSensitivity", 2), sensLabels, 5, [&](int v) {
                     writeSysInt(vidSec.c_str(), "TouchLookSensitivity", v);
                 });
-                doSpinner(4, tr("Gyroscope Aim", "Mira Giroscópio"), tr("Enables motion aiming via device or controller gyro.", "Ativa mira por movimento usando giroscópio."), readSysInt(vidSec.c_str(), "GyroAimMode", 0), isPtLanguage() ? gyroModePt : gyroModeEn, 3, [&](int v) {
+                doSpinner(4, tr("Compass Tap Action", "Toque na Bússola"), tr("Screen opened when tapping the HUD compass.", "Tela aberta ao tocar na bússola do HUD."), readSysInt(vidSec.c_str(), "TouchCompassAction", 0), isPtLanguage() ? compassPt : compassEn, 2, [&](int v) {
+                    writeSysInt(vidSec.c_str(), "TouchCompassAction", v);
+                });
+                doToggle(5, tr("Smart Touch Controls", "Touch Inteligente"), tr("Automatically shows or hides context-specific buttons (Scope, Laser, Reload, Drop/Throw) and highlights Use on targets.", "Exibe ou oculta botões conforme o contexto (Mira, Laser, Recarregar, Soltar/Jogar) e destaca Usar em alvos."), readSysInt(vidSec.c_str(), "TouchSmartContext", 1) != 0, [&](bool v) {
+                    writeSysInt(vidSec.c_str(), "TouchSmartContext", v ? 1 : 0);
+                });
+                doSpinner(6, tr("Gyroscope Aim", "Mira Giroscópio"), tr("Enables motion aiming via device or controller gyro.", "Ativa mira por movimento usando giroscópio."), readSysInt(vidSec.c_str(), "GyroAimMode", 0), isPtLanguage() ? gyroModePt : gyroModeEn, 3, [&](int v) {
                     writeSysInt(vidSec.c_str(), "GyroAimMode", v);
                 });
-                doSpinner(5, tr("Gyro Sensitivity", "Sensib. Giroscópio"), tr("Camera rotation speed from motion.", "Sensibilidade de movimento."), readSysInt(vidSec.c_str(), "GyroSensitivity", 2), gyroSens, 6, [&](int v) {
+                doSpinner(7, tr("Gyro Sensitivity", "Sensib. Giroscópio"), tr("Camera rotation speed from motion.", "Sensibilidade de movimento."), readSysInt(vidSec.c_str(), "GyroSensitivity", 2), gyroSens, 6, [&](int v) {
                     writeSysInt(vidSec.c_str(), "GyroSensitivity", v);
                 });
-                doSpinner(6, tr("Gyro Yaw Axis", "Eixo Horiz. Gyro"), tr("Chooses horizontal turning motion axis.", "Define eixo de giro horizontal."), readSysInt(vidSec.c_str(), "GyroAxisMode", 0), isPtLanguage() ? gyroAxisPt : gyroAxisEn, 3, [&](int v) {
+                doSpinner(8, tr("Gyro Yaw Axis", "Eixo Horiz. Gyro"), tr("Chooses horizontal turning motion axis.", "Define eixo de giro horizontal."), readSysInt(vidSec.c_str(), "GyroAxisMode", 0), isPtLanguage() ? gyroAxisPt : gyroAxisEn, 3, [&](int v) {
                     writeSysInt(vidSec.c_str(), "GyroAxisMode", v);
                 });
-                doToggle(7, tr("Invert Gyro Y", "Inverter Y Gyro"), tr("Inverts pitch direction for gyro aiming.", "Inverte eixo vertical do giroscópio."), readSysInt(vidSec.c_str(), "GyroInvertY", 0) != 0, [&](bool v) {
+                doToggle(9, tr("Invert Gyro Y", "Inverter Y Gyro"), tr("Inverts pitch direction for gyro aiming.", "Inverte eixo vertical do giroscópio."), readSysInt(vidSec.c_str(), "GyroInvertY", 0) != 0, [&](bool v) {
                     writeSysInt(vidSec.c_str(), "GyroInvertY", v ? 1 : 0);
+                });
+                static const char* const rumbleStrEn[] = { "Off", "Low (40%)", "Medium (75%)", "High (100%)" };
+                static const char* const rumbleStrPt[] = { "Desl.", "Suave (40%)", "Médio (75%)", "Forte (100%)" };
+                static const char* const rumbleOutEn[] = { "Auto", "Gamepad Only", "Device Only", "Both" };
+                static const char* const rumbleOutPt[] = { "Auto", "Só Controle", "Só Aparelho", "Ambos" };
+                doSpinner(10, tr("Vibration / Rumble", "Vibração (Rumble)"), tr("Tactile vibration intensity for weapons, explosions, damage, and tools.", "Intensidade da vibração tátil para armas, explosões, dano e ferramentas."), readSysInt(vidSec.c_str(), "RumbleStrength", 2), isPtLanguage() ? rumbleStrPt : rumbleStrEn, 4, [&](int v) {
+                    writeSysInt(vidSec.c_str(), "RumbleStrength", v);
+                    static constexpr float kPreview[] = { 0.0f, 0.35f, 0.65f, 0.95f };
+                    float p = kPreview[std::clamp(v, 0, 3)];
+                    if (p > 0.0f) {
+                        game::rumbleLauncherTest(nullptr, p, p * 0.7f, 80);
+                    }
+                });
+                doSpinner(11, tr("Rumble Output", "Saída da Vibração"), tr("Where vibration plays. Auto uses controller rumble or falls back to the device vibrator.", "Onde a vibração toca. Auto usa o controle ou o vibrador do aparelho."), readSysInt(vidSec.c_str(), "RumbleTarget", 0), isPtLanguage() ? rumbleOutPt : rumbleOutEn, 4, [&](int v) {
+                    writeSysInt(vidSec.c_str(), "RumbleTarget", v);
+                });
+                doToggle(12, tr("Touch Button Haptics", "Toque Tátil Touch"), tr("Subtle vibration click when pressing on-screen touch buttons.", "Vibração sutil ao pressionar os botões touch na tela."), readSysInt(vidSec.c_str(), "TouchHapticsEnabled", 0) != 0 || readSysInt(vidSec.c_str(), "TouchOverlaysEnabled", 1) == 2, [&](bool v) {
+                    writeSysInt(vidSec.c_str(), "TouchHapticsEnabled", v ? 1 : 0);
                 });
                 break;
             }
@@ -2673,15 +2700,25 @@ namespace game {
                 break;
             case 5: { // Gameplay & HUD
                 constexpr const char* kPlrSec = "DeusEx.DeusExPlayer";
-                static const char* const themeList[] = {
-                    "Default", "Amber", "Blue & Gold", "Cool Green", "Cops", "Cyan", "Dark Blue",
-                    "Desert Storm", "Dried Blood", "Dusk", "Green", "Grey", "Ion Storm", "Lava",
-                    "Night Vision", "Purple", "Red", "Seawater", "Steel", "Terminator", "Violet"
+                static const char* const menuThemeList[] = {
+                    "Default", "Blue & Gold", "Cool Green", "Cops", "Cyan", "Desert Storm",
+                    "Dried Blood", "Dusk", "Earth", "Green", "Grey", "Ion Storm", "Lava",
+                    "Night Vision", "Ninja", "Olive", "Pale Green", "Pastel", "Plasma",
+                    "Primaries", "Purple", "Red", "Seawater", "Soylent Green", "Starlight",
+                    "Steel", "Steel Green", "Superhero", "Terminator", "Violet"
                 };
-                auto findThemeIdx = [&](const char* key) {
+                static const char* const hudThemeList[] = {
+                    "Default", "Amber", "Cops", "Cyan", "Dark Blue", "Desert Storm",
+                    "Dried Blood", "Dusk", "Grey", "Ion Storm", "Night Vision", "Ninja",
+                    "Pale Green", "Pastel", "Plasma", "Primaries", "Purple", "Red",
+                    "Soylent Green", "Starlight", "Steel Green", "Superhero", "Terminator", "Violet"
+                };
+                constexpr int kMenuThemeCount = static_cast<int>(sizeof(menuThemeList) / sizeof(menuThemeList[0]));
+                constexpr int kHudThemeCount = static_cast<int>(sizeof(hudThemeList) / sizeof(hudThemeList[0]));
+                auto findThemeIdx = [&](const char* key, const char* const* list, int listCount) {
                     std::string cur = dx::config::user().get(kPlrSec, key).value_or("Default");
-                    for (int i = 0; i < 21; ++i) {
-                        if (iequalsStr(cur, themeList[i])) return i;
+                    for (int i = 0; i < listCount; ++i) {
+                        if (iequalsStr(cur, list[i])) return i;
                     }
                     return 0;
                 };
@@ -2716,13 +2753,13 @@ namespace game {
                 doToggle(9, tr("Ammo Display", "Contador de Munição"), tr("Show weapon ammo readout.", "Mostra munição restante."), readUserBool(kPlrSec, "bAmmoDisplayVisible", true), [&](bool v) {
                     writeUserBool(kPlrSec, "bAmmoDisplayVisible", v);
                 });
-                doSpinner(10, tr("Menu Colour Theme", "Tema dos Menus"), tr("Tints DXLauncher and in-game menus.", "Tema de cores dos menus e do DXLauncher."), findThemeIdx("MenuThemeName"), themeList, 21, [&](int idx) {
-                    dx::config::user().set(kPlrSec, "MenuThemeName", themeList[idx]);
+                doSpinner(10, tr("Menu Colour Theme", "Tema dos Menus"), tr("Tints DXLauncher and in-game menus.", "Tema de cores dos menus e do DXLauncher."), findThemeIdx("MenuThemeName", menuThemeList, kMenuThemeCount), menuThemeList, kMenuThemeCount, [&](int idx) {
+                    dx::config::user().set(kPlrSec, "MenuThemeName", menuThemeList[idx]);
                     st.appliedThemeName.clear();
                     applyMenuTheme(st);
                 });
-                doSpinner(11, tr("HUD Colour Theme", "Tema do HUD"), tr("Tints in-game HUD overlays.", "Tema de cores do HUD em jogo."), findThemeIdx("HUDThemeName"), themeList, 21, [&](int idx) {
-                    dx::config::user().set(kPlrSec, "HUDThemeName", themeList[idx]);
+                doSpinner(11, tr("HUD Colour Theme", "Tema do HUD"), tr("Tints in-game HUD overlays.", "Tema de cores do HUD em jogo."), findThemeIdx("HUDThemeName", hudThemeList, kHudThemeCount), hudThemeList, kHudThemeCount, [&](int idx) {
+                    dx::config::user().set(kPlrSec, "HUDThemeName", hudThemeList[idx]);
                 });
                 break;
             }
@@ -3222,7 +3259,7 @@ namespace game {
                 auto closeTest = [&]() {
                     SDL_Gamepad* tg = SDL_GetGamepadFromID(st.padTestId);
                     if (tg && st.padTestRumbling) {
-                        SDL_RumbleGamepad(tg, 0, 0, 0);
+                        game::rumbleLauncherTest(tg, 0.0f, 0.0f, 0);
                     }
                     st.padTestRumbling = false;
                     st.padTestHoldSince = -1.0;
@@ -3259,12 +3296,10 @@ namespace game {
                 float lt = std::max(0.0f, static_cast<float>(SDL_GetGamepadAxis(tg, SDL_GAMEPAD_AXIS_LEFT_TRIGGER)) / 32767.0f);
                 float rt = std::max(0.0f, static_cast<float>(SDL_GetGamepadAxis(tg, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)) / 32767.0f);
                 if (lt > 0.05f || rt > 0.05f) {
-                    SDL_RumbleGamepad(tg,
-                        static_cast<Uint16>(std::min(lt, 1.0f) * 65535.0f),
-                        static_cast<Uint16>(std::min(rt, 1.0f) * 65535.0f), 250);
+                    game::rumbleLauncherTest(tg, std::min(lt, 1.0f), std::min(rt, 1.0f), 250);
                     st.padTestRumbling = true;
                 } else if (st.padTestRumbling) {
-                    SDL_RumbleGamepad(tg, 0, 0, 0);
+                    game::rumbleLauncherTest(tg, 0.0f, 0.0f, 0);
                     st.padTestRumbling = false;
                 }
                 dxl_ui_animate(ui);

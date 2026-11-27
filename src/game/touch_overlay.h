@@ -35,7 +35,62 @@ namespace game {
         QuickSave,
         QuickLoad,
         AugsMenu,
+        Drop,
+        Throw,
         Count,
+    };
+
+    enum class TouchFrobKind : uint8_t {
+        None = 0,
+        Generic,
+        Pickup,
+        Door,
+        DoorLocked,
+        Talk,
+        Grab,
+        Corpse,
+        Disarm,
+    };
+
+    enum class TouchFireKind : uint8_t {
+        None = 0,
+        Fire,
+        Melee,
+        Throw,
+        Plant,
+        Pick,
+        Hack,
+        UseItem,
+        DeactivateItem,
+        DetonateDrone,
+    };
+
+    struct TouchGameContext {
+        bool valid = false;
+        bool carryingObject = false;
+        bool carryingCorpse = false;
+        bool hasItemInHand = false;
+        bool spyDroneActive = false;
+        bool isSwimming = false;
+        bool onLadder = false;
+        bool isCrouching = false;
+        bool gameToggleCrouch = false;
+        bool canLean = true;
+        bool hasScope = false;
+        bool scopeIsBinoculars = false;
+        bool isScoped = false;
+        bool hasLaser = false;
+        bool isLaserOn = false;
+        bool canReload = false;
+        bool needsReload = false;
+        bool lowOrEmptyClip = false;
+        bool hasMultiAmmo = false;
+        bool hasAnyAug = false;
+        bool anyAugActive = false;
+        bool hasLightAug = false;
+        bool lightAugActive = false;
+        TouchFrobKind frobKind = TouchFrobKind::None;
+        TouchFireKind fireKind = TouchFireKind::None;
     };
 
     struct TouchAugEntry {
@@ -56,9 +111,15 @@ namespace game {
 
     struct TouchOverlaySettings {
         bool enabled = true;
+        bool smartContext = true;
         float opacity = 0.55f;
         float scale = 1.0f;
         float lookSensitivity = 1.0f;
+    };
+
+    struct TouchHudAction {
+        uint8_t key = 0;
+        const char* command = nullptr;
     };
 
     struct TouchInputCallbacks {
@@ -66,7 +127,10 @@ namespace game {
         std::function<void(uint8_t key, float value)> onAxis;
         std::function<void(float dx, float dy)> onLookDelta;
         std::function<void()> onQuickRightClick;
-        std::function<uint8_t(float screenX, float screenY)> hitTestHudKey;
+        std::function<TouchHudAction(float screenX, float screenY)> hitTestHud;
+        std::function<void(const char* command)> onCommand;
+        std::function<void(bool softDrop)> onDropCarried;
+        std::function<void()> onButtonHaptic;
     };
 
     class TouchOverlayManager {
@@ -86,6 +150,7 @@ namespace game {
         bool isAugDrawerOpen() const { return augDrawerOpen_; }
         bool isFireHeld() const { return buttons_[static_cast<size_t>(TouchControlId::Fire)].active; }
         void setAugEntries(std::vector<TouchAugEntry> entries) { augEntries_ = std::move(entries); }
+        void setGameContext(const TouchGameContext& ctx);
         void openEditor();
         void closeEditor(bool saveChanges);
 
@@ -109,6 +174,7 @@ namespace game {
             bool active = false;
             bool fingerDown = false;
             SDL_FingerID finger = 0;
+            uint8_t pressedKey = 0;
             bool dragAimMoved = false;
             float prevX = 0.0f;
             float prevY = 0.0f;
@@ -117,6 +183,9 @@ namespace game {
         void buildDefaultLayouts();
         float controlRadiusPx(TouchControlId id, int drawHeight) const;
         bool isActionToggle(TouchControlId id) const;
+        bool isContextualControl(TouchControlId id) const;
+        bool isControlContextVisible(TouchControlId id) const;
+        const char* dynamicControlLabel(TouchControlId id, bool ptBr) const;
         int hitTestControl(float xNorm, float yNorm, int drawWidth, int drawHeight, bool includeDisabled) const;
         void releaseAllControls(const TouchInputCallbacks& cb);
         void releaseTouchStickOnly(const TouchInputCallbacks& cb);
@@ -138,6 +207,8 @@ namespace game {
         bool visible_ = false;
         bool editorOpen_ = false;
         bool toolbarAtBottom_ = false;
+        bool editorSnapGrid_ = true;
+        bool layoutCustomized_ = false;
         int selectedControl_ = 0;
         int activePreset_ = 0;
 
@@ -165,6 +236,7 @@ namespace game {
         uint64_t lookDownTicks_ = 0;
 
         bool crouchToggled_ = false;
+        uint64_t crouchPulseEndTicks_ = 0;
         bool augDrawerOpen_ = false;
         std::vector<TouchAugEntry> augEntries_;
 
@@ -178,6 +250,10 @@ namespace game {
 
         bool keypadExitDown_ = false;
         SDL_FingerID keypadExitFinger_ = 0;
+
+        TouchGameContext ctx_ {};
+        TouchFrobKind displayFrobKind_ = TouchFrobKind::None;
+        uint64_t lastFrobTicks_ = 0;
     };
 
 } // namespace game

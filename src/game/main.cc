@@ -9,12 +9,15 @@
 #include "engine/canvas_hooks.h"
 #include "engine/console.h"
 #include "engine/input.h"
+#include "engine/props_deusex.h"
 #include "engine/resources.h"
+#include "engine/rumble_hooks.h"
 #include "engine/savegame.h"
 #include "engine/world.h"
 #include "extension/extension.h"
 #include "game/gyro_aim.h"
 #include "game/perf_overlay.h"
+#include "game/rumble.h"
 #include "game/touch_overlay.h"
 #ifdef OPENDEX_HAS_DXLAUNCHER
 #include "launcher/opende_launcher.h"
@@ -277,6 +280,7 @@ namespace {
 
         ~Game()
         {
+            rumble.shutdown();
             gyroAim.shutdown();
             closeController();
         }
@@ -449,9 +453,9 @@ namespace {
                   "Velocidade de movimento do jogador em porcentagem da velocidade normal.",
                   {}, {} },
                 { "DeusEx.MenuChoice_TouchOverlaysEnabled", "|&Touch Overlays", "|&Overlays Touch",
-                  "Shows configurable on-screen touch controls when you tap the screen, and hides them immediately when using a controller or keyboard. Off keeps gameplay touch disabled.",
-                  "Exibe controles virtuais na tela ao tocar e os oculta na hora ao usar controle ou teclado. Desligado desativa o toque no jogo.",
-                  { "Off", "On" }, { "Desl.", "Lig." } },
+                  "Shows configurable on-screen touch controls when you tap the screen, and hides them immediately when using a controller or keyboard. On + Haptics adds a subtle vibration click on touch buttons.",
+                  "Exibe controles virtuais na tela ao tocar e os oculta na hora ao usar controle ou teclado. Lig. + Tátil adiciona vibração sutil nos botões.",
+                  { "Off", "On", "On + Haptics" }, { "Desl.", "Lig.", "Lig. + Tátil" } },
                 { "DeusEx.MenuChoice_TouchOverlayOpacity", "Touch |&Opacity", "O|&pacidade do Touch",
                   "Transparency of the on-screen touch controls during gameplay.",
                   "Transparência dos controles virtuais na tela durante o jogo.",
@@ -468,6 +472,26 @@ namespace {
                   "Opens the visual Touch Layout Editor to move, resize, show, or hide each on-screen control.",
                   "Abre o Editor de Layout Touch para mover, redimensionar, mostrar ou ocultar cada botão.",
                   { "Open Editor", "Open Editor" }, { "Abrir Editor", "Abrir Editor" } },
+                { "DeusEx.MenuChoice_TouchCompassAction", "Compass |&Tap Action", "Toque na |&Bússola",
+                  "Chooses which screen opens when tapping the HUD compass.",
+                  "Define qual tela abre ao tocar na bússola do HUD.",
+                  { "Goals / Notes", "Images" }, { "Objetivos / Notas", "Imagens" } },
+                { "DeusEx.MenuChoice_TouchSmartContext", "|&Smart Touch Controls", "Touch |&Inteligente",
+                  "Automatically shows or hides context-specific touch buttons (Scope, Laser, Reload, Drop/Throw) and highlights Use on interactive targets.",
+                  "Exibe ou oculta automaticamente botões conforme o contexto (Mira, Laser, Recarregar, Soltar/Jogar) e destaca Usar em alvos interativos.",
+                  { "Off", "On" }, { "Desl.", "Lig." } },
+                { "DeusEx.MenuChoice_TouchHaptics", "Touch Button |&Haptics", "Toque Tátil |&Touch",
+                  "Adds a subtle vibration click when pressing on-screen touch buttons.",
+                  "Adiciona uma vibração sutil ao pressionar os botões touch na tela.",
+                  { "Off", "On" }, { "Desl.", "Lig." } },
+                { "DeusEx.MenuChoice_RumbleStrength", "|&Vibration / Rumble", "|&Vibração (Rumble)",
+                  "Tactile vibration intensity for weapons, explosions, damage, impacts, and tools.",
+                  "Intensidade da vibração tátil para armas, explosões, dano, quedas e ferramentas.",
+                  { "Off", "Low (40%)", "Medium (75%)", "High (100%)" }, { "Desl.", "Suave (40%)", "Médio (75%)", "Forte (100%)" } },
+                { "DeusEx.MenuChoice_RumbleTarget", "Rumble |&Output", "|&Saída da Vibração",
+                  "Chooses where vibration plays. Auto uses controller rumble when available and falls back to the device vibrator.",
+                  "Escolhe onde a vibração toca. Auto usa o controle quando disponível e o vibrador do aparelho como alternativa.",
+                  { "Auto", "Gamepad Only", "Device Only", "Both" }, { "Auto", "Só Controle", "Só Aparelho", "Ambos" } },
                 { "DeusEx.MenuChoice_GyroAimMode", "|&Gyroscope Aim", "Mira |&Giroscópio",
                   "Enables camera aiming with the device or controller gyroscope. Aim / Scope activates gyro while scoping or firing.",
                   "Ativa a mira por movimento usando o giroscópio do aparelho ou controle. Ao Mirar ativa só com mira ou disparo.",
@@ -669,9 +693,13 @@ namespace {
 #else
             constexpr bool defaultTouchOverlays = false;
 #endif
-            addEnumChoice(gameplay, 2, "MenuChoice_TouchOverlaysEnabled", "|&Touch Overlays",
-                "Shows configurable on-screen touch controls when you tap the screen, and hides them immediately when using a controller or keyboard. Off keeps gameplay touch disabled.",
-                "TouchOverlaysEnabled", { "Off", "On" }, defaultTouchOverlays ? 1 : 0);
+            dx::UClass* touchEnabledChoice = addChoice(
+                gameplay, 2, "DeusEx.MenuUIChoiceEnum", "MenuChoice_TouchOverlaysEnabled", "|&Touch Overlays",
+                "Shows configurable on-screen touch controls when you tap the screen, and hides them immediately when using a controller or keyboard. On + Haptics adds a subtle vibration click on touch buttons.",
+                "TouchOverlaysEnabled", { "Off", "On", "On + Haptics" }, defaultTouchOverlays ? 1 : 0, defaultTouchOverlays ? "1" : "0");
+            if (touchEnabledChoice && touchEnabledChoice->defaultObject) {
+                *reinterpret_cast<int32_t*>(touchEnabledChoice->defaultObject->propertyAddress(dx::Name("defaultInfoWidth"))) = 140;
+            }
             addEnumChoice(gameplay, 3, "MenuChoice_TouchOverlayOpacity", "Touch |&Opacity",
                 "Transparency of the on-screen touch controls during gameplay.",
                 "TouchOverlayOpacity", { "25%", "40%", "55%", "75%", "95%" }, 2);
@@ -691,33 +719,40 @@ namespace {
             dx::deusex::configureTouchEditorChoice(touchEditorChoiceClass, [this]() {
                 touchOverlay.openEditor();
             });
-            addFixVanillaBugsChoice(gameplay, 7);
+            dx::UClass* compassTouchChoice = addChoice(
+                gameplay, 7, "DeusEx.MenuUIChoiceEnum", "MenuChoice_TouchCompassAction", "Compass |&Tap Action",
+                "Chooses which screen opens when tapping the HUD compass.",
+                "TouchCompassAction", { "Goals / Notes", "Images" }, 0, "0");
+            if (compassTouchChoice && compassTouchChoice->defaultObject) {
+                *reinterpret_cast<int32_t*>(compassTouchChoice->defaultObject->propertyAddress(dx::Name("defaultInfoWidth"))) = 140;
+            }
+            addEnumChoice(gameplay, 8, "MenuChoice_TouchSmartContext", "|&Smart Touch Controls",
+                "Automatically shows or hides context-specific touch buttons (Scope, Laser, Reload, Drop/Throw) and highlights Use on interactive targets.",
+                "TouchSmartContext", { "Off", "On" }, 1);
+            addFixVanillaBugsChoice(gameplay, 9);
             dx::UClass* gyroModeChoice = addChoice(
-                gameplay, 8, "DeusEx.MenuUIChoiceEnum", "MenuChoice_GyroAimMode", "|&Gyroscope Aim",
+                gameplay, 10, "DeusEx.MenuUIChoiceEnum", "MenuChoice_GyroAimMode", "|&Gyroscope Aim",
                 "Enables camera aiming with the device or controller gyroscope. Aim / Scope activates gyro while scoping or firing.",
                 "GyroAimMode", { "Off", "Always On", "Aim / Scope" }, 0, "0");
             if (gyroModeChoice && gyroModeChoice->defaultObject) {
                 *reinterpret_cast<int32_t*>(gyroModeChoice->defaultObject->propertyAddress(dx::Name("defaultInfoWidth"))) = 140;
             }
-            addEnumChoice(gameplay, 9, "MenuChoice_GyroSensitivity", "Gyro |&Sensitivity",
+            addEnumChoice(gameplay, 11, "MenuChoice_GyroSensitivity", "Gyro |&Sensitivity",
                 "Camera rotation speed from gyroscope motion.",
                 "GyroSensitivity", { "0.5x", "0.75x", "1.0x", "1.5x", "2.0x", "3.0x" }, 2);
             dx::UClass* gyroAxisChoice = addChoice(
-                gameplay, 10, "DeusEx.MenuUIChoiceEnum", "MenuChoice_GyroAxisMode", "Gyro |&Yaw Axis",
+                gameplay, 12, "DeusEx.MenuUIChoiceEnum", "MenuChoice_GyroAxisMode", "Gyro |&Yaw Axis",
                 "Chooses horizontal turning motion. Auto uses gravity so turning works smoothly regardless of how tilted you hold the device.",
                 "GyroAxisMode", { "Auto (Gravity)", "Yaw (Turn)", "Roll (Steer)" }, 0, "0");
             if (gyroAxisChoice && gyroAxisChoice->defaultObject) {
                 *reinterpret_cast<int32_t*>(gyroAxisChoice->defaultObject->propertyAddress(dx::Name("defaultInfoWidth"))) = 140;
             }
-            addEnumChoice(gameplay, 11, "MenuChoice_GyroInvertY", "|&Invert Gyro Y",
-                "Inverts vertical pitch direction for gyroscope aiming.",
-                "GyroInvertY", { "Off", "On" }, 0);
 
             dx::UObject* gameplayDefaults = gameplay->defaultObject;
             int gameplayGap = *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("choiceVerticalGap")));
             int gameplaySliderRow = *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("choiceStartY"))) + 8 * gameplayGap;
             int32_t& gameplayClientHeight = *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("ClientHeight")));
-            constexpr int gameplayExtraRows = 3;
+            constexpr int gameplayExtraRows = 4;
             dx::deusex::spliceMenuBackground(gameplayDefaults, gameplayClientHeight, *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("textureRows"))) * 256);
             dx::deusex::spliceMenuBackground(gameplayDefaults, gameplaySliderRow, gameplaySliderRow + gameplayGap);
             dx::deusex::spliceMenuBackground(gameplayDefaults, gameplaySliderRow, gameplaySliderRow - gameplayGap);
@@ -726,6 +761,49 @@ namespace {
             }
             gameplayClientHeight += gameplayExtraRows * gameplayGap;
             *reinterpret_cast<int32_t*>(gameplayDefaults->propertyAddress(dx::Name("helpPosY"))) += gameplayExtraRows * gameplayGap;
+
+            // Add Vibration / Rumble options directly to Settings -> Controls (plenty of spare slots & height).
+            if (dx::UClass* controlsScreen = dx::objects::findClass("DeusEx.MenuScreenControls"); controlsScreen && controlsScreen->defaultObject) {
+                dx::UObject* ctrlDef = controlsScreen->defaultObject;
+                dx::UProperty* choicesProp = controlsScreen->findProperty(dx::Name("choices"));
+                int firstFree = -1;
+                if (choicesProp) {
+                    for (int i = 0; i < choicesProp->arrayDim; ++i) {
+                        if (*reinterpret_cast<dx::UObject**>(ctrlDef->propertyAddress(dx::Name("choices"), i)) == nullptr) {
+                            firstFree = i;
+                            break;
+                        }
+                    }
+                }
+                if (firstFree >= 0 && choicesProp && firstFree + 2 < choicesProp->arrayDim) {
+                    dx::UClass* rumbleStrengthChoice = addChoice(
+                        controlsScreen, firstFree, "DeusEx.MenuUIChoiceEnum", "MenuChoice_RumbleStrength", "|&Vibration / Rumble",
+                        "Tactile vibration intensity for weapons, explosions, damage, impacts, and tools.",
+                        "RumbleStrength", { "Off", "Low (40%)", "Medium (75%)", "High (100%)" }, 2, "2");
+                    if (rumbleStrengthChoice && rumbleStrengthChoice->defaultObject) {
+                        *reinterpret_cast<int32_t*>(rumbleStrengthChoice->defaultObject->propertyAddress(dx::Name("defaultInfoWidth"))) = 140;
+                    }
+                    dx::UClass* rumbleTargetChoice = addChoice(
+                        controlsScreen, firstFree + 1, "DeusEx.MenuUIChoiceEnum", "MenuChoice_RumbleTarget", "Rumble |&Output",
+                        "Chooses where vibration plays. Auto uses controller rumble when available and falls back to the device vibrator.",
+                        "RumbleTarget", { "Auto", "Gamepad Only", "Device Only", "Both" }, 0, "0");
+                    if (rumbleTargetChoice && rumbleTargetChoice->defaultObject) {
+                        *reinterpret_cast<int32_t*>(rumbleTargetChoice->defaultObject->propertyAddress(dx::Name("defaultInfoWidth"))) = 140;
+                    }
+                    addEnumChoice(controlsScreen, firstFree + 2, "MenuChoice_GyroInvertY", "|&Invert Gyro Y",
+                        "Inverts vertical pitch direction for gyroscope aiming.",
+                        "GyroInvertY", { "Off", "On" }, 0);
+                    int ctrlGap = *reinterpret_cast<int32_t*>(ctrlDef->propertyAddress(dx::Name("choiceVerticalGap")));
+                    int ctrlStartY = *reinterpret_cast<int32_t*>(ctrlDef->propertyAddress(dx::Name("choiceStartY")));
+                    int32_t& ctrlClientHeight = *reinterpret_cast<int32_t*>(ctrlDef->propertyAddress(dx::Name("ClientHeight")));
+                    int spliceY = ctrlStartY + std::max(1, firstFree - 1) * ctrlGap;
+                    for (int i = 0; i < 3; ++i) {
+                        dx::deusex::spliceMenuBackground(ctrlDef, spliceY + ctrlGap, spliceY);
+                    }
+                    ctrlClientHeight += 3 * ctrlGap;
+                    *reinterpret_cast<int32_t*>(ctrlDef->propertyAddress(dx::Name("helpPosY"))) += 3 * ctrlGap;
+                }
+            }
 
             syncExtraMenusLocalization();
             if (hasDxControllerMenu) {
@@ -826,6 +904,7 @@ namespace {
             perfOverlay.setMode(static_cast<game::PerfOverlayMode>(std::clamp(videoSetting("PerformanceHUD", 0), 0, 2)));
             applyTouchOptions();
             applyGyroOptions();
+            applyRumbleOptions();
             constexpr int kFrameLimits[] = { 0, 30, 60, 75, 120, 144, 165, 240 };
             appliedFrameRateLimit = kFrameLimits[std::clamp(videoSetting("FrameRateLimit", 0), 0, 7)];
             if (browser || options.frames >= 0) {
@@ -1015,10 +1094,45 @@ namespace {
             addFieldOfViewChoice();
             addExtraOptions();
             gyroAim.initialize();
+            rumble.initialize();
+            dx::rumbleHooks().onPlayerLanded = [this](dx::UObject* player, float impactSpeedZ) {
+                bool speedAug = false;
+                if (player && !player->destroyed && player->data && dx::offsets_deusexplayer.AugmentationSystem != 0 &&
+                    player->cls && player->cls->isChildOf(dx::objects::findClass("DeusEx.DeusExPlayer"))) {
+                    dx::UObject* augMgr = dx::deusexplayer::AugmentationSystem(player);
+                    if (augMgr && !augMgr->destroyed && augMgr->cls) {
+                        static const dx::Name nameFirstAug("FirstAug");
+                        static const dx::Name nameNext("next");
+                        static const dx::Name nameIsActive("bIsActive");
+                        dx::UProperty* firstProp = augMgr->cls->findProperty(nameFirstAug);
+                        dx::UObject* aug = (firstProp && firstProp->type == dx::PropType::Object)
+                            ? *reinterpret_cast<dx::UObject* const*>(augMgr->data + firstProp->offset)
+                            : nullptr;
+                        for (int guard = 0; aug && !aug->destroyed && aug->cls && guard < 24; ++guard) {
+                            if (aug->cls->name == dx::Name("AugSpeed")) {
+                                dx::UProperty* pAct = aug->cls->findProperty(nameIsActive);
+                                if (pAct && pAct->type == dx::PropType::Bool && *reinterpret_cast<const uint32_t*>(aug->data + pAct->offset) != 0) {
+                                    speedAug = true;
+                                }
+                                break;
+                            }
+                            dx::UProperty* nextProp = aug->cls->findProperty(nameNext);
+                            aug = (nextProp && nextProp->type == dx::PropType::Object)
+                                ? *reinterpret_cast<dx::UObject* const*>(aug->data + nextProp->offset)
+                                : nullptr;
+                        }
+                    }
+                }
+                rumble.playLanding(impactSpeedZ, speedAug);
+            };
+            dx::rumbleHooks().onHearSound = [this](std::string_view soundName, float distance, float radius, bool fromPlayerOrOwned) {
+                rumble.onHearSound(soundName, distance, radius, fromPlayerOrOwned);
+            };
             initControllers();
             touchOverlay.load(videoSection());
             applyTouchOptions();
             applyGyroOptions();
+            applyRumbleOptions();
             std::string map = options.map;
             std::filesystem::path mapFile = map;
             if (mapFile.has_parent_path() && std::filesystem::is_regular_file(mapFile)) {
@@ -1052,6 +1166,8 @@ namespace {
 
         bool openMap(const std::string& url, bool carryItems = false)
         {
+            rumble.stopAll();
+            rumble.resetPlayerTracking();
             std::vector<dx::TravelActor> travel;
             std::vector<std::pair<std::string, std::string>> travelInfo;
             if (carryItems && world) {
@@ -1109,6 +1225,62 @@ namespace {
             };
             if (!world->loadMap(target)) {
                 return false;
+            }
+            // Guard against invalid MenuThemeName / HUDThemeName in User.ini (e.g. HUD-only theme "Amber"
+            // assigned as menu theme), which otherwise leaves currentMenuTheme == None and renders all menus black.
+            if (dx::UObject* p = world->player(); p && !p->destroyed && p->cls && p->data
+                && dx::offsets_deusexplayer.ThemeManager != 0
+                && p->cls->isChildOf(dx::objects::findClass("DeusEx.DeusExPlayer"))) {
+                dx::UObject* tm = dx::deusexplayer::ThemeManager(p);
+                if (tm && !tm->destroyed && tm->cls && tm->data) {
+                    bool healed = false;
+                    if (dx::UProperty* cp = tm->cls->findProperty(dx::Name("currentMenuTheme")); cp && cp->type == dx::PropType::Object) {
+                        dx::UObject* curMenu = *reinterpret_cast<dx::UObject* const*>(tm->data + cp->offset);
+                        if (!curMenu) {
+                            dx::vm::Call(tm, dx::Name("SetMenuThemeByName")).s("Default").run();
+                            curMenu = *reinterpret_cast<dx::UObject* const*>(tm->data + cp->offset);
+                            if (!curMenu) {
+                                dx::vm::Call firstCall(tm, dx::Name("GetFirstTheme"));
+                                firstCall.i(0).run();
+                                dx::UObject* firstMenu = firstCall.returnValue() ? *reinterpret_cast<dx::UObject**>(firstCall.returnValue()) : nullptr;
+                                if (firstMenu) {
+                                    dx::vm::Call(tm, dx::Name("SetCurrentMenuColorTheme")).obj(firstMenu).run();
+                                }
+                            }
+                            if (dx::offsets_deusexplayer.MenuThemeName != 0) {
+                                dx::deusexplayer::MenuThemeName(p) = "Default";
+                            }
+                            dx::config::user().set("DeusEx.DeusExPlayer", "MenuThemeName", "Default");
+                            healed = true;
+                        }
+                    }
+                    if (dx::UProperty* cp = tm->cls->findProperty(dx::Name("currentHUDTheme")); cp && cp->type == dx::PropType::Object) {
+                        dx::UObject* curHud = *reinterpret_cast<dx::UObject* const*>(tm->data + cp->offset);
+                        if (!curHud) {
+                            dx::vm::Call(tm, dx::Name("SetHUDThemeByName")).s("Default").run();
+                            curHud = *reinterpret_cast<dx::UObject* const*>(tm->data + cp->offset);
+                            if (!curHud) {
+                                dx::vm::Call firstCall(tm, dx::Name("GetFirstTheme"));
+                                firstCall.i(1).run();
+                                dx::UObject* firstHud = firstCall.returnValue() ? *reinterpret_cast<dx::UObject**>(firstCall.returnValue()) : nullptr;
+                                if (firstHud) {
+                                    dx::vm::Call(tm, dx::Name("SetCurrentHUDColorTheme")).obj(firstHud).run();
+                                }
+                            }
+                            if (dx::offsets_deusexplayer.HUDThemeName != 0) {
+                                dx::deusexplayer::HUDThemeName(p) = "Default";
+                            }
+                            dx::config::user().set("DeusEx.DeusExPlayer", "HUDThemeName", "Default");
+                            healed = true;
+                        }
+                    }
+                    if (healed) {
+                        dx::config::user().save();
+                        if (dx::UObject* root = dx::extension::rootWindow(); root && !root->destroyed) {
+                            dx::vm::Call(root, dx::Name("ChangeStyle")).run();
+                        }
+                    }
+                }
             }
             if (loading) {
                 world->url = world->level->url;
@@ -1248,6 +1420,7 @@ namespace {
 
         void closeController()
         {
+            rumble.setController(nullptr);
             gyroAim.setController(nullptr);
             if (controller) {
                 SDL_CloseGamepad(controller);
@@ -1306,6 +1479,7 @@ namespace {
             controllerId = SDL_GetGamepadID(controller);
             updateGamepadInfo();
             gyroAim.setController(controller);
+            rumble.setController(controller);
         }
 
         void initControllers()
@@ -1342,8 +1516,37 @@ namespace {
                     handleKey(dx::IK_RightMouse, true);
                     handleKey(dx::IK_RightMouse, false);
                 },
-                [](float sx, float sy) {
-                    return dx::extension::hitTestHudBeltKey(sx, sy);
+                [this](float sx, float sy) -> game::TouchHudAction {
+                    dx::extension::HudTouchHit hit = dx::extension::hitTestHudTouch(sx, sy, touchCompassOpensImages);
+                    return { hit.key, hit.command };
+                },
+                [this](const char* command) {
+                    if (command && command[0] && world && world->player()) {
+                        dx::console::execute(world->player(), command);
+                    }
+                },
+                [this](bool softDrop) {
+                    if (!world || !world->player()) {
+                        return;
+                    }
+                    dx::UObject* player = world->player();
+                    dx::UObject* carried = (dx::offsets_pawn.carriedDecoration != 0)
+                        ? dx::pawn::carriedDecoration(player)
+                        : nullptr;
+                    if (carried && !carried->destroyed) {
+                        dx::console::execute(player, "DropItem");
+                        if (softDrop && !carried->destroyed && dx::offsets_actor.Velocity != 0) {
+                            dx::UObject* stillCarried = dx::pawn::carriedDecoration(player);
+                            if (!stillCarried) {
+                                dx::actor::Velocity(carried) = dx::Vector { 0.0f, 0.0f, 0.0f };
+                            }
+                        }
+                        return;
+                    }
+                    dx::console::execute(player, softDrop ? "DropItem None True" : "DropItem");
+                },
+                [this]() {
+                    rumble.playTouchButton();
                 },
             };
         }
@@ -1364,9 +1567,11 @@ namespace {
                 touchOverlay.releaseGameplayInputs(touchCallbacks());
             }
             ts.enabled = nextEnabled;
+            ts.smartContext = videoSetting("TouchSmartContext", 1) != 0;
             ts.opacity = opacities[std::clamp(videoSetting("TouchOverlayOpacity", 2), 0, 4)];
             ts.scale = scales[std::clamp(videoSetting("TouchOverlayScale", 1), 0, 3)];
             ts.lookSensitivity = lookSens[std::clamp(videoSetting("TouchLookSensitivity", 2), 0, 4)];
+            touchCompassOpensImages = videoSetting("TouchCompassAction", 0) == 1;
             touchOverlay.setSettings(ts);
         }
 
@@ -1379,6 +1584,15 @@ namespace {
             gs.axis = static_cast<game::GyroAxisMode>(std::clamp(videoSetting("GyroAxisMode", 0), 0, 2));
             gs.invertY = videoSetting("GyroInvertY", 0) != 0;
             gyroAim.setSettings(gs);
+        }
+
+        void applyRumbleOptions()
+        {
+            game::RumbleSettings rs;
+            rs.strength = static_cast<game::RumbleStrength>(std::clamp(videoSetting("RumbleStrength", 2), 0, 3));
+            rs.target = static_cast<game::RumbleTarget>(std::clamp(videoSetting("RumbleTarget", 0), 0, 3));
+            rs.touchButtonHaptics = videoSetting("TouchHapticsEnabled", 0) != 0 || videoSetting("TouchOverlaysEnabled", 1) == 2;
+            rumble.setSettings(rs);
         }
 
         void pollGyro(bool gui)
@@ -1430,6 +1644,7 @@ namespace {
                 return;
             }
             lastInputWasGamepad = false;
+            dx::extension::setTouchInputActive(true);
             if (touchOverlay.isEditorOpen()) {
                 touchOverlay.handleTouchEvent(event, drawWidth, drawHeight, touchCallbacks());
                 return;
@@ -1614,6 +1829,7 @@ namespace {
                     break;
                 case SDL_EVENT_WILL_ENTER_BACKGROUND:
                     inBackground = true;
+                    rumble.stopAll();
                     gyroAim.setSuspended(true);
                     dx::audio::suspend();
                     dx::config::system().save();
@@ -1802,69 +2018,231 @@ namespace {
                 profHudMs = dx::profNowMs() - tHud0;
             }
             float tOvl0 = dx::profNowMs();
-            if (touchOverlay.isVisible() && touchOverlay.isAugDrawerOpen() && world && world->player()) {
-                std::vector<game::TouchAugEntry> augs;
+            if (touchOverlay.isVisible() && world && world->player()) {
+                game::TouchGameContext ctx {};
                 dx::UObject* player = world->player();
-                static const dx::Name nameAugSystem("AugmentationSystem");
-                dx::UProperty* augSysProp = (player && player->cls) ? player->cls->findProperty(nameAugSystem) : nullptr;
-                dx::UObject* augMgr = (augSysProp && augSysProp->type == dx::PropType::Object)
-                    ? *reinterpret_cast<dx::UObject* const*>(player->data + augSysProp->offset)
-                    : nullptr;
-                if (augMgr && !augMgr->destroyed && augMgr->cls) {
-                    static const dx::Name nameFirstAug("FirstAug");
-                    static const dx::Name nameNext("next");
-                    static const dx::Name nameHasIt("bHasIt");
-                    static const dx::Name nameAlwaysActive("bAlwaysActive");
-                    static const dx::Name nameIsActive("bIsActive");
-                    static const dx::Name nameHotKeyNum("HotKeyNum");
-                    static const dx::Name nameAugName("AugmentationName");
-                    dx::UProperty* firstProp = augMgr->cls->findProperty(nameFirstAug);
-                    dx::UObject* aug = (firstProp && firstProp->type == dx::PropType::Object)
-                        ? *reinterpret_cast<dx::UObject* const*>(augMgr->data + firstProp->offset)
-                        : nullptr;
-                    for (int guard = 0; aug && !aug->destroyed && aug->cls && guard < 32; ++guard) {
-                        auto readBool = [aug](dx::Name propName, bool fallback) {
-                            dx::UProperty* p = aug->cls->findProperty(propName);
-                            return (p && p->type == dx::PropType::Bool)
-                                ? (*reinterpret_cast<const uint32_t*>(aug->data + p->offset) != 0)
-                                : fallback;
-                        };
-                        bool hasIt = readBool(nameHasIt, false);
-                        bool alwaysActive = readBool(nameAlwaysActive, false);
-                        bool isActive = readBool(nameIsActive, false);
-                        dx::UProperty* hkProp = aug->cls->findProperty(nameHotKeyNum);
-                        int32_t hotKey = (hkProp && hkProp->type == dx::PropType::Int)
-                            ? *reinterpret_cast<const int32_t*>(aug->data + hkProp->offset)
-                            : 0;
-                        if (hasIt && !alwaysActive && hotKey >= 1 && hotKey <= 12) {
-                            dx::UProperty* nProp = aug->cls->findProperty(nameAugName);
-                            std::string label;
-                            if (nProp && (nProp->type == dx::PropType::Str || nProp->type == dx::PropType::String)) {
-                                label = *reinterpret_cast<const std::string*>(aug->data + nProp->offset);
-                            }
-                            if (label.empty()) {
-                                label = aug->name.str();
-                            }
-                            if (label.size() > 10) {
-                                label.resize(10);
-                            }
-                            augs.push_back(game::TouchAugEntry {
-                                std::move(label),
-                                static_cast<uint8_t>(dx::IK_F1 + (hotKey - 1)),
-                                hotKey,
-                                isActive,
-                            });
-                        }
-                        dx::UProperty* nextProp = aug->cls->findProperty(nameNext);
-                        aug = (nextProp && nextProp->type == dx::PropType::Object)
-                            ? *reinterpret_cast<dx::UObject* const*>(aug->data + nextProp->offset)
-                            : nullptr;
+                if (player && !player->destroyed && player->cls && player->data && dx::isPlayerPawn(player)) {
+                    dx::UClass* clsDxPlayer = dx::objects::findClass("DeusEx.DeusExPlayer");
+                    dx::UClass* clsDxWeapon = dx::objects::findClass("DeusEx.DeusExWeapon");
+                    dx::UClass* clsDxMover = dx::objects::findClass("DeusEx.DeusExMover");
+                    dx::UClass* clsScriptedPawn = dx::objects::findClass("DeusEx.ScriptedPawn");
+                    dx::UClass* clsCarcass = dx::objects::findClass("DeusEx.DeusExCarcass");
+                    dx::UClass* clsThrownProj = dx::objects::findClass("DeusEx.ThrownProjectile");
+                    dx::UClass* clsDecoration = dx::objects::findClass("Engine.Decoration");
+                    dx::UClass* clsInventory = dx::objects::findClass("Engine.Inventory");
+                    dx::UClass* clsNanoKey = dx::objects::findClass("DeusEx.NanoKey");
+                    dx::UClass* clsPovCorpse = dx::objects::findClass("DeusEx.POVCorpse");
+                    dx::UClass* clsBinoculars = dx::objects::findClass("DeusEx.Binoculars");
+                    dx::UClass* clsLockpick = dx::objects::findClass("DeusEx.Lockpick");
+                    dx::UClass* clsNanoKeyRing = dx::objects::findClass("DeusEx.NanoKeyRing");
+                    dx::UClass* clsMultitool = dx::objects::findClass("DeusEx.Multitool");
+                    dx::UClass* clsHackable = dx::objects::findClass("DeusEx.HackableDevices");
+                    dx::UClass* clsAugLight = dx::objects::findClass("DeusEx.AugLight");
+
+                    const bool isDxPlayer = clsDxPlayer && player->cls->isChildOf(clsDxPlayer);
+                    ctx.valid = true;
+
+                    const uint8_t phys = (dx::offsets_actor.Physics != 0) ? dx::actor::Physics(player) : 0;
+                    ctx.isSwimming = (phys == dx::PHYS_Swimming);
+
+                    static const dx::Name nameOnLadder("bOnLadder");
+                    if (dx::UProperty* pLadder = player->cls->findProperty(nameOnLadder); pLadder && pLadder->type == dx::PropType::Bool) {
+                        ctx.onLadder = (*reinterpret_cast<const uint32_t*>(player->data + pLadder->offset) != 0);
                     }
-                    std::sort(augs.begin(), augs.end(), [](const game::TouchAugEntry& a, const game::TouchAugEntry& b) {
-                        return a.hotKeyNum < b.hotKeyNum;
-                    });
+
+                    ctx.isCrouching = (dx::offsets_playerpawn.bIsCrouching != 0 && dx::playerpawn::bIsCrouching(player) != 0)
+                        || (dx::offsets_pawn.bDuck != 0 && dx::pawn::bDuck(player) != 0);
+                    if (isDxPlayer) {
+                        if (dx::offsets_deusexplayer.bForceDuck != 0 && dx::deusexplayer::bForceDuck(player) != 0) {
+                            ctx.isCrouching = true;
+                        }
+                        if (dx::offsets_deusexplayer.bToggleCrouch != 0) {
+                            ctx.gameToggleCrouch = (dx::deusexplayer::bToggleCrouch(player) != 0);
+                        }
+                        if (dx::offsets_deusexplayer.bCanLean != 0) {
+                            ctx.canLean = (dx::deusexplayer::bCanLean(player) != 0);
+                        }
+                        if (dx::offsets_deusexplayer.bSpyDroneActive != 0) {
+                            ctx.spyDroneActive = (dx::deusexplayer::bSpyDroneActive(player) != 0);
+                        }
+                    }
+
+                    dx::UObject* carried = (dx::offsets_pawn.carriedDecoration != 0) ? dx::pawn::carriedDecoration(player) : nullptr;
+                    if (carried && carried->destroyed) {
+                        carried = nullptr;
+                    }
+                    dx::UObject* inHand = (isDxPlayer && dx::offsets_deusexplayer.inHand != 0)
+                        ? dx::deusexplayer::inHand(player)
+                        : nullptr;
+                    if (!inHand && dx::offsets_pawn.Weapon != 0) {
+                        inHand = dx::pawn::Weapon(player);
+                    }
+                    if (inHand && (inHand->destroyed || !inHand->cls || !inHand->data)) {
+                        inHand = nullptr;
+                    }
+
+                    ctx.carryingCorpse = inHand && clsPovCorpse && inHand->cls->isChildOf(clsPovCorpse);
+                    ctx.carryingObject = (carried != nullptr) || ctx.carryingCorpse;
+                    ctx.hasItemInHand = (inHand != nullptr);
+
+                    dx::UObject* frob = (isDxPlayer && dx::offsets_deusexplayer.FrobTarget != 0)
+                        ? dx::deusexplayer::FrobTarget(player)
+                        : nullptr;
+                    if (frob && (frob->destroyed || !frob->cls || !frob->data)) {
+                        frob = nullptr;
+                    }
+                    if (frob) {
+                        if ((clsNanoKey && frob->cls->isChildOf(clsNanoKey)) || (clsInventory && frob->cls->isChildOf(clsInventory))) {
+                            ctx.frobKind = game::TouchFrobKind::Pickup;
+                        } else if (clsDxMover && frob->cls->isChildOf(clsDxMover)) {
+                            const bool locked = (dx::offsets_deusexmover.bLocked != 0 && dx::deusexmover::bLocked(frob) != 0);
+                            ctx.frobKind = locked ? game::TouchFrobKind::DoorLocked : game::TouchFrobKind::Door;
+                        } else if (clsScriptedPawn && frob->cls->isChildOf(clsScriptedPawn)) {
+                            ctx.frobKind = game::TouchFrobKind::Talk;
+                        } else if (clsCarcass && frob->cls->isChildOf(clsCarcass)) {
+                            ctx.frobKind = game::TouchFrobKind::Corpse;
+                        } else if (clsThrownProj && frob->cls->isChildOf(clsThrownProj)) {
+                            ctx.frobKind = game::TouchFrobKind::Disarm;
+                        } else if (clsDecoration && frob->cls->isChildOf(clsDecoration) && dx::offsets_decoration.bPushable != 0 && dx::decoration::bPushable(frob) != 0) {
+                            ctx.frobKind = game::TouchFrobKind::Grab;
+                        } else {
+                            ctx.frobKind = game::TouchFrobKind::Generic;
+                        }
+                    }
+
+                    if (ctx.spyDroneActive) {
+                        ctx.fireKind = game::TouchFireKind::DetonateDrone;
+                    } else if (ctx.carryingObject) {
+                        ctx.fireKind = game::TouchFireKind::None;
+                    } else if (inHand && clsDxWeapon && inHand->cls->isChildOf(clsDxWeapon)) {
+                        ctx.hasScope = (dx::offsets_deusexweapon.bHasScope != 0 && dx::deusexweapon::bHasScope(inHand) != 0);
+                        ctx.isScoped = (dx::offsets_deusexweapon.bZoomed != 0 && dx::deusexweapon::bZoomed(inHand) != 0);
+                        ctx.hasLaser = (dx::offsets_deusexweapon.bHasLaser != 0 && dx::deusexweapon::bHasLaser(inHand) != 0);
+                        ctx.isLaserOn = (dx::offsets_deusexweapon.bLasing != 0 && dx::deusexweapon::bLasing(inHand) != 0);
+                        const bool h2h = (dx::offsets_deusexweapon.bHandToHand != 0 && dx::deusexweapon::bHandToHand(inHand) != 0);
+                        const int32_t reloadCnt = (dx::offsets_weapon.ReloadCount != 0) ? static_cast<int32_t>(dx::weapon::ReloadCount(inHand)) : 0;
+                        const int32_t clipCnt = (dx::offsets_deusexweapon.ClipCount != 0) ? dx::deusexweapon::ClipCount(inHand) : 0;
+                        const int32_t lowWater = (dx::offsets_deusexweapon.LowAmmoWaterMark != 0) ? dx::deusexweapon::LowAmmoWaterMark(inHand) : 0;
+                        ctx.canReload = !h2h && reloadCnt > 0;
+                        ctx.needsReload = ctx.canReload && clipCnt > 0;
+                        ctx.lowOrEmptyClip = ctx.canReload && (clipCnt >= reloadCnt || (reloadCnt - clipCnt) <= std::max(1, lowWater));
+                        ctx.hasMultiAmmo = (dx::offsets_deusexweapon.AmmoNames != 0 && dx::deusexweapon::AmmoNames(inHand, 1) != nullptr);
+
+                        const bool nearWall = (dx::offsets_deusexweapon.bNearWall != 0 && dx::deusexweapon::bNearWall(inHand) != 0);
+                        if (nearWall) {
+                            ctx.fireKind = game::TouchFireKind::Plant;
+                        } else if (h2h) {
+                            const std::string& wName = inHand->cls->name.str();
+                            const bool isThrown = (wName.find("Grenade") != std::string::npos ||
+                                                   wName.find("LAM") != std::string::npos ||
+                                                   wName.find("Shuriken") != std::string::npos);
+                            ctx.fireKind = isThrown ? game::TouchFireKind::Throw : game::TouchFireKind::Melee;
+                        } else {
+                            ctx.fireKind = game::TouchFireKind::Fire;
+                        }
+                    } else if (inHand && clsBinoculars && inHand->cls->isChildOf(clsBinoculars)) {
+                        const bool active = (dx::offsets_inventory.bActive != 0 && dx::inventory::bActive(inHand) != 0);
+                        ctx.hasScope = true;
+                        ctx.scopeIsBinoculars = true;
+                        ctx.isScoped = active;
+                        ctx.fireKind = active ? game::TouchFireKind::DeactivateItem : game::TouchFireKind::UseItem;
+                    } else if (inHand) {
+                        const bool activatable = (dx::offsets_inventory.bActivatable != 0 && dx::inventory::bActivatable(inHand) != 0);
+                        const bool active = (dx::offsets_inventory.bActive != 0 && dx::inventory::bActive(inHand) != 0);
+                        if (activatable) {
+                            ctx.fireKind = active ? game::TouchFireKind::DeactivateItem : game::TouchFireKind::UseItem;
+                        } else if (frob && clsDxMover && frob->cls->isChildOf(clsDxMover)
+                            && ((clsLockpick && inHand->cls->isChildOf(clsLockpick)) || (clsNanoKeyRing && inHand->cls->isChildOf(clsNanoKeyRing)))) {
+                            ctx.fireKind = game::TouchFireKind::Pick;
+                        } else if (frob && clsHackable && frob->cls->isChildOf(clsHackable)
+                            && clsMultitool && inHand->cls->isChildOf(clsMultitool)) {
+                            ctx.fireKind = game::TouchFireKind::Hack;
+                        } else {
+                            ctx.fireKind = game::TouchFireKind::None;
+                        }
+                    }
+
+                    // Scan player's AugmentationSystem once for both context indicators and Aug drawer
+                    std::vector<game::TouchAugEntry> augs;
+                    const bool collectDrawer = touchOverlay.isAugDrawerOpen();
+                    static const dx::Name nameAugSystem("AugmentationSystem");
+                    dx::UProperty* augSysProp = player->cls->findProperty(nameAugSystem);
+                    dx::UObject* augMgr = (augSysProp && augSysProp->type == dx::PropType::Object)
+                        ? *reinterpret_cast<dx::UObject* const*>(player->data + augSysProp->offset)
+                        : nullptr;
+                    if (augMgr && !augMgr->destroyed && augMgr->cls) {
+                        static const dx::Name nameFirstAug("FirstAug");
+                        static const dx::Name nameNext("next");
+                        static const dx::Name nameHasIt("bHasIt");
+                        static const dx::Name nameAlwaysActive("bAlwaysActive");
+                        static const dx::Name nameIsActive("bIsActive");
+                        static const dx::Name nameHotKeyNum("HotKeyNum");
+                        static const dx::Name nameAugName("AugmentationName");
+                        dx::UProperty* firstProp = augMgr->cls->findProperty(nameFirstAug);
+                        dx::UObject* aug = (firstProp && firstProp->type == dx::PropType::Object)
+                            ? *reinterpret_cast<dx::UObject* const*>(augMgr->data + firstProp->offset)
+                            : nullptr;
+                        for (int guard = 0; aug && !aug->destroyed && aug->cls && guard < 32; ++guard) {
+                            auto readBool = [aug](dx::Name propName, bool fallback) {
+                                dx::UProperty* p = aug->cls->findProperty(propName);
+                                return (p && p->type == dx::PropType::Bool)
+                                    ? (*reinterpret_cast<const uint32_t*>(aug->data + p->offset) != 0)
+                                    : fallback;
+                            };
+                            bool hasIt = readBool(nameHasIt, false);
+                            bool alwaysActive = readBool(nameAlwaysActive, false);
+                            bool isActive = readBool(nameIsActive, false);
+                            dx::UProperty* hkProp = aug->cls->findProperty(nameHotKeyNum);
+                            int32_t hotKey = (hkProp && hkProp->type == dx::PropType::Int)
+                                ? *reinterpret_cast<const int32_t*>(aug->data + hkProp->offset)
+                                : 0;
+                            if (hasIt && !alwaysActive && hotKey >= 1 && hotKey <= 12) {
+                                ctx.hasAnyAug = true;
+                                if (isActive) {
+                                    ctx.anyAugActive = true;
+                                }
+                                if (clsAugLight && aug->cls->isChildOf(clsAugLight)) {
+                                    ctx.hasLightAug = true;
+                                    ctx.lightAugActive = isActive;
+                                }
+                                if (collectDrawer) {
+                                    dx::UProperty* nProp = aug->cls->findProperty(nameAugName);
+                                    std::string label;
+                                    if (nProp && (nProp->type == dx::PropType::Str || nProp->type == dx::PropType::String)) {
+                                        label = *reinterpret_cast<const std::string*>(aug->data + nProp->offset);
+                                    }
+                                    if (label.empty()) {
+                                        label = aug->name.str();
+                                    }
+                                    if (label.size() > 10) {
+                                        label.resize(10);
+                                    }
+                                    augs.push_back(game::TouchAugEntry {
+                                        std::move(label),
+                                        static_cast<uint8_t>(dx::IK_F1 + (hotKey - 1)),
+                                        hotKey,
+                                        isActive,
+                                    });
+                                }
+                            }
+                            dx::UProperty* nextProp = aug->cls->findProperty(nameNext);
+                            aug = (nextProp && nextProp->type == dx::PropType::Object)
+                                ? *reinterpret_cast<dx::UObject* const*>(aug->data + nextProp->offset)
+                                : nullptr;
+                        }
+                        if (collectDrawer) {
+                            std::sort(augs.begin(), augs.end(), [](const game::TouchAugEntry& a, const game::TouchAugEntry& b) {
+                                return a.hotKeyNum < b.hotKeyNum;
+                            });
+                            touchOverlay.setAugEntries(std::move(augs));
+                        }
+                    } else if (collectDrawer) {
+                        touchOverlay.setAugEntries({});
+                    }
                 }
-                touchOverlay.setAugEntries(std::move(augs));
+                touchOverlay.setGameContext(ctx);
+            } else {
+                touchOverlay.setGameContext(game::TouchGameContext {});
             }
             float kx = 0.0f;
             float ky = 0.0f;
@@ -2061,6 +2439,40 @@ namespace {
                     static_cast<double>(gi.upVec[2]),
                     static_cast<double>(gi.lastOutputYawRad),
                     static_cast<double>(gi.lastOutputPitchRad));
+            } else if (verb == "rumble") {
+                char sub[32] = {};
+                char arg[32] = {};
+                int parsed = std::sscanf(rest.c_str(), "%31s %31s", sub, arg);
+                if (parsed >= 2) {
+                    if (std::strcmp(sub, "test") == 0) {
+                        rumble.triggerTestPreset(arg);
+                    } else if (std::strcmp(sub, "strength") == 0) {
+                        dx::config::system().set(videoSection(), "RumbleStrength", std::to_string(std::clamp(std::atoi(arg), 0, 3)));
+                        applyRumbleOptions();
+                    } else if (std::strcmp(sub, "target") == 0) {
+                        dx::config::system().set(videoSection(), "RumbleTarget", std::to_string(std::clamp(std::atoi(arg), 0, 3)));
+                        applyRumbleOptions();
+                    } else if (std::strcmp(sub, "touch") == 0) {
+                        dx::config::system().set(videoSection(), "TouchHapticsEnabled", std::atoi(arg) != 0 ? "1" : "0");
+                        applyRumbleOptions();
+                    }
+                }
+                game::RumbleDebugInfo ri = rumble.debugInfo();
+                const game::RumbleSettings& rs = rumble.settings();
+                SDL_LogInfo(SDL_LOG_CATEGORY_APPLICATION,
+                    "OpenDE_Rumble: status strength=%d target=%d touch=%d pad=%d(sdl=%d,trig=%d) androidCaps=0x%x out=%s ch=%d low=%.2f high=%.2f events=%llu",
+                    static_cast<int>(rs.strength),
+                    static_cast<int>(rs.target),
+                    rs.touchButtonHaptics ? 1 : 0,
+                    ri.controllerConnected ? 1 : 0,
+                    ri.controllerHasRumble ? 1 : 0,
+                    ri.controllerHasTriggerRumble ? 1 : 0,
+                    ri.androidCaps,
+                    ri.activeOutput.c_str(),
+                    ri.activeChannels,
+                    static_cast<double>(ri.currentLow),
+                    static_cast<double>(ri.currentHigh),
+                    static_cast<unsigned long long>(ri.eventsTriggered));
             } else if (verb == "state") {
                 dx::UObject* player = world ? world->player() : nullptr;
                 if (player) {
@@ -2361,6 +2773,9 @@ namespace {
                     dx::console::ConsoleLines(console) = static_cast<int32_t>(std::min(dx::console::ConsolePos(console) * static_cast<float>(consoleHeight), static_cast<float>(consoleHeight)));
                 }
                 handleTravel();
+                bool rumbleGameplay = !gui && !inBackground && world && !world->paused && !touchOverlay.isEditorOpen();
+                rumble.samplePlayerState(world ? world->player() : nullptr, delta, rumbleGameplay);
+                rumble.update(delta, gui || inBackground || !world || world->paused || touchOverlay.isEditorOpen(), lastInputWasGamepad);
             }
             uint64_t tTick1 = SDL_GetPerformanceCounter();
             int width = 0;
@@ -2549,9 +2964,11 @@ namespace {
         SDL_FingerID menuFinger = 0;
         bool textInputRequested = false;
         bool lastInputWasGamepad = false;
+        bool touchCompassOpensImages = false;
         game::TouchOverlayManager touchOverlay;
         game::PerfOverlay perfOverlay;
         game::GyroAim gyroAim;
+        game::RumbleEngine rumble;
         int gyroRotationPollCounter = 0;
         uint64_t perfLastSwap = 0;
         dx::UClass* touchEditorChoiceClass = nullptr;
