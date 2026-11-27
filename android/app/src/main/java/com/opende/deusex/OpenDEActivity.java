@@ -93,7 +93,14 @@ public class OpenDEActivity extends SDLActivity {
     }
 
     @Override
+    protected void onPause() {
+        RumbleHelper.stopAll(this);
+        super.onPause();
+    }
+
+    @Override
     protected void onDestroy() {
+        RumbleHelper.stopAll(this);
         if (sBridge != null) {
             sBridge.onDestroy();
             sBridge = null;
@@ -258,5 +265,23 @@ public class OpenDEActivity extends SDLActivity {
     public static void bridgeConsumeInstalledModId() {
         AndroidBridge b = sBridge;
         if (b != null) b.consumeInstalledModId();
+    }
+
+    // ---- Universal Android Rumble JNI Bridge ----
+
+    public static int rumbleGetCaps() {
+        return RumbleHelper.getCapabilities(getContext());
+    }
+
+    public static void rumbleDevice(float low, float high, int durationMs, int primitiveHint) {
+        RumbleHelper.rumbleDevice(getContext(), low, high, durationMs, primitiveHint);
+    }
+
+    public static boolean rumbleGamepadLegacy(float low, float high, int durationMs) {
+        return RumbleHelper.rumbleGamepadLegacy(low, high, durationMs);
+    }
+
+    public static void rumbleStopAll() {
+        RumbleHelper.stopAll(getContext());
     }
 }

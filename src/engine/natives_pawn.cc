@@ -6,6 +6,7 @@
 #include "engine/latent.h"
 #include "engine/path_builder.h"
 #include "engine/resources.h"
+#include "engine/rumble_hooks.h"
 #include "engine/world.h"
 
 #include <algorithm>
@@ -2573,6 +2574,12 @@ namespace dx {
         float radius = parameters.y != 0 ? parameters.y : 1600.0f;
         float pitch = static_cast<float>(static_cast<double>(parameters.z) * 0.01);
         objects::ensureLoaded(data);
+        if (rumbleHooks().onHearSound) {
+            const Vector hearerLoc = actor::Location(hearer);
+            const float dist = (location - hearerLoc).size();
+            const bool owned = source != nullptr && (source == hearer || actor::Owner(source) == hearer || actor::Instigator(source) == hearer);
+            rumbleHooks().onHearSound(data->name.str(), dist, radius, owned);
+        }
         return audio::playSound(data, source, (id >> 1) & 7, location, volume, radius, pitch, true, (id & 1) != 0);
     }
 

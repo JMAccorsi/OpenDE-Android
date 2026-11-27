@@ -1,6 +1,7 @@
 #include "core/objects.h"
 #include "core/vm.h"
 #include "engine/actor.h"
+#include "engine/rumble_hooks.h"
 #include "engine/world.h"
 
 #include <algorithm>
@@ -1278,6 +1279,9 @@ namespace dx {
             }
         } else if (a->isA(engineClasses().decoration)) {
             decoration::numLandings(a) = 0;
+        }
+        if (isPlayerPawn(a) && playerpawn::Player(a) && rumbleHooks().onPlayerLanded) {
+            rumbleHooks().onPlayerLanded(a, actor::Velocity(a).z);
         }
         vm::Call(a, Name("Landed")).v(hitNormal).run();
         if (a->destroyed) {
