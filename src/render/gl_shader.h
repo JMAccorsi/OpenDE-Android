@@ -30,6 +30,7 @@ namespace dx {
         void setEye(const Vector& eye, const Vector& forward);
         void setClipPlanes(const float* planes, int32_t count);
         void setOcclusion(float weight);
+        void setMrtOcclusion(bool enabled);
         void setGamma(float exponent);
         void setBlend(BlendMode mode);
         void setCulling(bool enabled);
@@ -101,13 +102,16 @@ namespace dx {
         float activeGamma() const;
         void bindVao(uint32_t vao);
 
-        uint32_t programs[6] = {};
-        Locations locations[6];
-        uint32_t dirtyMask[6] = {};
-        float programGamma[6] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+        static constexpr int32_t ProgramCount = 12;
+
+        uint32_t programs[ProgramCount] = {};
+        Locations locations[ProgramCount];
+        uint32_t dirtyMask[ProgramCount] = {};
+        float programGamma[ProgramCount] = { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
         int32_t current = 0;
         State state;
         bool smoothLightmapActive = false;
+        bool mrtOcclusionActive = false;
         uint32_t boundTexture = ~0u;
         uint32_t boundLightmap = ~0u;
         uint32_t boundVao = ~0u;

@@ -108,7 +108,9 @@ uniform vec4 uLightDirection[32];
 uniform float uOcclusion;
 uniform float uGamma;
 layout(location = 0) out vec4 fragColor;
+#ifdef MRT_OCCLUSION
 layout(location = 1) out vec4 occlusionMask;
+#endif
 mediump vec3 lightmap()
 {
 #if defined(SMOOTH_LIGHTMAP) && !defined(CLIP_PLANES)
@@ -174,7 +176,9 @@ void main()
         discard;
     }
 #endif
+#ifdef MRT_OCCLUSION
     occlusionMask = vec4(uOcclusion);
+#endif
     if ((uFlags & 32) != 0)
     {
         mediump float va = vColor.a;
@@ -533,7 +537,7 @@ void main()
     UberShader::UberShader()
     {
         static_assert(GL_TRIANGLES == 0x0004);
-        auto buildProgram = [&](int32_t index, bool useHwClip) -> GLuint {
+        auto buildProgram = [&](int32_t index, bool useHwClip, bool mrtOcclusion) -> GLuint {
             std::string vertexPrefix = "#version 330 core\n";
             std::string fragmentPrefix = "#version 330 core\n";
             const char* esVersion = "#version 300 es\n";
@@ -555,6 +559,9 @@ void main()
             }
             if (index & 4) {
                 fragmentPrefix += "#define SMOOTH_LIGHTMAP\n";
+            }
+            if (mrtOcclusion) {
+                fragmentPrefix += "#define MRT_OCCLUSION\n";
             }
             GLuint vertex = compile(GL_VERTEX_SHADER, vertexSource, vertexPrefix.c_str(), esVersion);
             GLuint fragment = 0;
@@ -584,8 +591,8 @@ void main()
             return program;
         };
 
-        programs[0] = buildProgram(0, false);
-        programs[1] = buildProgram(1, false);
+        programs[0] = buildProgram(0, false, false);
+        programs[1] = buildProgram(1, false, false);
 #if defined(__EMSCRIPTEN__)
         bool tryHwClip = false;
 #elif defined(__ANDROID__)
@@ -596,8 +603,8 @@ void main()
         if (tryHwClip) {
 #ifdef __ANDROID__
             try {
-                programs[2] = buildProgram(2, true);
-                programs[3] = buildProgram(3, true);
+                programs[2] = buildProgram(2, true, false);
+                programs[3] = buildProgram(3, true, false);
             } catch (const std::exception& err) {
                 if (programs[2]) {
                     glDeleteProgram(programs[2]);
@@ -609,22 +616,28 @@ void main()
                 }
                 SDL_Log("OpenDE: HARDWARE_CLIP fallback to software clip planes: %s", err.what());
                 tryHwClip = false;
-                programs[2] = buildProgram(2, false);
-                programs[3] = buildProgram(3, false);
+                programs[2] = buildProgram(2, false, false);
+                programs[3] = buildProgram(3, false, false);
             }
 #else
-            programs[2] = buildProgram(2, true);
-            programs[3] = buildProgram(3, true);
+            programs[2] = buildProgram(2, true, false);
+            programs[3] = buildProgram(3, true, false);
 #endif
         } else {
-            programs[2] = buildProgram(2, false);
-            programs[3] = buildProgram(3, false);
+            programs[2] = buildProgram(2, false, false);
+            programs[3] = buildProgram(3, false, false);
         }
         hardwareClip = tryHwClip;
-        programs[4] = buildProgram(4, false);
-        programs[5] = buildProgram(5, false);
+        programs[4] = buildProgram(4, false, false);
+        programs[5] = buildProgram(5, false, false);
+        programs[6] = buildProgram(0, false, true);
+        programs[7] = buildProgram(1, false, true);
+        programs[8] = buildProgram(2, hardwareClip, true);
+        programs[9] = buildProgram(3, hardwareClip, true);
+        programs[10] = buildProgram(4, false, true);
+        programs[11] = buildProgram(5, false, true);
 
-        for (int32_t index = 0; index < 6; index++) {
+        for (int32_t index = 0; index < ProgramCount; index++) {
             GLuint program = programs[index];
             Locations& location = locations[index];
             location.viewProj = glGetUniformLocation(program, "uViewProj");
@@ -743,7 +756,7 @@ void main()
 
     void UberShader::markOthersDirty(uint32_t mask)
     {
-        for (int32_t i = 0; i < 6; i++) {
+        for (int32_t i = 0; i < ProgramCount; i++) {
             if (i != current) {
                 dirtyMask[i] |= mask;
             }
@@ -755,6 +768,9 @@ void main()
         int32_t wanted = ((state.flags & SHADER_AlphaTest) ? 1 : 0) | (state.clipCount > 0 ? 2 : 0);
         if (smoothLightmapActive && (wanted & 2) == 0) {
             wanted |= 4;
+        }
+        if (mrtOcclusionActive) {
+            wanted += 6;
         }
         return wanted;
     }
@@ -818,7 +834,9 @@ void main()
             glUniform4fv(location.clipPlanes, state.clipCount, state.clipPlanes);
         }
         glUniform1i(location.clipCount, state.clipCount);
-        glUniform1f(location.occlusion, state.occlusion);
+        if (location.occlusion >= 0) {
+            glUniform1f(location.occlusion, state.occlusion);
+        }
         const float gammaVal = activeGamma();
         glUniform1f(location.gamma, gammaVal);
         programGamma[current] = gammaVal;
@@ -868,7 +886,9 @@ void main()
             glUniform1i(location.clipCount, state.clipCount);
         }
         if (mask & DIRTY_Occlusion) {
+            if (location.occlusion >= 0) {
             glUniform1f(location.occlusion, state.occlusion);
+        }
         }
         if (mask & DIRTY_Gamma) {
             const float gammaVal = activeGamma();
@@ -995,7 +1015,21 @@ void main()
         }
         state.occlusion = weight;
         markOthersDirty(DIRTY_Occlusion);
-        glUniform1f(locations[current].occlusion, weight);
+        if (locations[current].occlusion >= 0) {
+            glUniform1f(locations[current].occlusion, weight);
+        }
+    }
+
+    void UberShader::setMrtOcclusion(bool enabled)
+    {
+        if (mrtOcclusionActive == enabled) {
+            return;
+        }
+        mrtOcclusionActive = enabled;
+        int32_t wanted = targetIndex();
+        if (wanted != current) {
+            select(wanted);
+        }
     }
 
     float UberShader::activeGamma() const

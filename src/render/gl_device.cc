@@ -87,17 +87,20 @@ namespace dx {
         int32_t targetFbo = -1;
 #endif
         scenePass->begin(width, height, samples, occluding, targetFbo);
+        shader->setMrtOcclusion(false);
     }
 
     void GLRenderDevice::endScene(int width, int height, bool fxaa)
     {
         scenePass->end(width, height, fxaa);
+        shader->setMrtOcclusion(false);
         shader->use();
     }
 
     void GLRenderDevice::beginOcclusion()
     {
         scenePass->beginOcclusion();
+        shader->setMrtOcclusion(scenePass->occluding());
     }
 
     void GLRenderDevice::setOcclusionSource(OcclusionSource source)
@@ -121,6 +124,7 @@ namespace dx {
             return;
         }
         scenePass->endOcclusion();
+        shader->setMrtOcclusion(false);
         uint32_t resolveColorFbo = scenePass->resolveColorForOcclusion(sceneWidth, sceneHeight);
         occlusionPass->apply(scenePass->sceneFramebuffer(), scenePass->sceneDepth(), scenePass->sceneMask(), resolveColorFbo, sceneWidth, sceneHeight, occlusionQuality, nearPlane, farPlane, tanHalfWidth, tanHalfHeight, scenePass->supportsColorMaski());
         shader->use();
