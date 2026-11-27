@@ -1744,6 +1744,7 @@ namespace dx::extension {
         if (!isCursorVisible()) {
             return;
         }
+        const bool touchActive = state().touchInputActive;
         float relativeX = 0;
         float relativeY = 0;
         UWindow* focus = cursorFocus(relativeX, relativeY);
@@ -1759,10 +1760,20 @@ namespace dx::extension {
             pointX += current->usedX;
             pointY += current->usedY;
         }
-        for (UWindow* current = focus; current && !cursor; current = current->parent()) {
-            if (current == this && state().touchInputActive) {
-                break;
+        if (touchActive) {
+            // Suppress all pointer cursors (default arrow, edit I-beam, etc.) on touch input,
+            // while still allowing non-cursor textures such as dragged inventory item icons.
+            if (!cursor) {
+                return;
             }
+            const std::string& cursorName = cursor->name.str();
+            if (cursor == window::defaultCursor(this) || cursor == rootwindow::defaultEditCursor(this)
+                || cursorName.find("Cursor") != std::string::npos
+                || cursorName.find("cursor") != std::string::npos) {
+                return;
+            }
+        }
+        for (UWindow* current = focus; current && !cursor; current = current->parent()) {
             if (window::defaultCursor(current)) {
                 cursor = window::defaultCursor(current);
                 shadow = window::defaultCursorShadow(current);
@@ -3931,6 +3942,47 @@ namespace dx::extension {
                 collectHudBeltSlots(child, absX, absY, slots);
             }
         }
+
+        uint8_t hitTestHudActiveAugs(UWindow* node, float parentX, float parentY, float vx, float vy)
+        {
+            if (!node || node->destroyed || !node->visible()) {
+                return 0;
+            }
+            float absX = parentX + node->usedX;
+            float absY = parentY + node->usedY;
+            static const Name nameHudActiveAug("HUDActiveAug");
+            static const Name nameHudActiveItemBase("HUDActiveItemBase");
+            static const Name nameHotKeyNum("HotKeyNum");
+            static const Name nameHotKeyNumLower("hotKeyNum");
+
+            if (node->cls && (node->cls->name == nameHudActiveAug || node->cls->name == nameHudActiveItemBase)) {
+                if (vx >= absX && vx < absX + node->width() && vy >= absY && vy < absY + node->height()) {
+                    int32_t hotKey = 0;
+                    if (UObject* client = window::clientObject(node); client && !client->destroyed && client->cls) {
+                        if (UProperty* prop = client->cls->findProperty(nameHotKeyNum); prop && prop->type == PropType::Int) {
+                            hotKey = *reinterpret_cast<const int32_t*>(client->data + prop->offset);
+                        }
+                    }
+                    if (hotKey < 1 || hotKey > 12) {
+                        if (UProperty* prop = node->cls->findProperty(nameHotKeyNum); prop && prop->type == PropType::Int) {
+                            hotKey = *reinterpret_cast<const int32_t*>(node->data + prop->offset);
+                        } else if (UProperty* propLower = node->cls->findProperty(nameHotKeyNumLower); propLower && propLower->type == PropType::Int) {
+                            hotKey = *reinterpret_cast<const int32_t*>(node->data + propLower->offset);
+                        }
+                    }
+                    if (hotKey >= 1 && hotKey <= 12) {
+                        return static_cast<uint8_t>(IK_F1 + (hotKey - 1));
+                    }
+                }
+                return 0;
+            }
+            for (UWindow* child = node->lastChild(); child; child = child->prevSibling()) {
+                if (uint8_t hitKey = hitTestHudActiveAugs(child, absX, absY, vx, vy)) {
+                    return hitKey;
+                }
+            }
+            return 0;
+        }
     }
 
     uint8_t hitTestHudBeltKey(float screenX, float screenY)
@@ -3968,6 +4020,55 @@ namespace dx::extension {
             }
         }
         return 0;
+    }
+
+    HudTouchHit hitTestHudTouch(float screenX, float screenY, bool compassOpensImages)
+    {
+        State& s = state();
+        if (!s.root || s.root->destroyed || s.root->isCursorVisible() || s.root->isModalOpen()) {
+            return {};
+        }
+        if (uint8_t beltKey = hitTestHudBeltKey(screenX, screenY)) {
+            return HudTouchHit { beltKey, nullptr };
+        }
+        float scale = virtualScale();
+        if (scale <= 0.0f) {
+            return {};
+        }
+        float vx = screenX / scale;
+        float vy = screenY / scale;
+
+        // 1. Health / Bioelectric diagram (top-left) -> Health Persona screen
+        static const Name nameHudHitDisplay("HUDHitDisplay");
+        float hitX = 0.0f;
+        float hitY = 0.0f;
+        if (UWindow* hitDisp = findVisibleWindowByClass(s.root, nameHudHitDisplay, 0.0f, 0.0f, hitX, hitY)) {
+            if (vx >= hitX && vx < hitX + hitDisp->width() && vy >= hitY && vy < hitY + hitDisp->height()) {
+                return HudTouchHit { 0, "ShowHealthWindow" };
+            }
+        }
+
+        // 2. Compass display (top-left below health) -> Goals/Notes or Images (configurable)
+        static const Name nameHudCompassDisplay("HUDCompassDisplay");
+        float compX = 0.0f;
+        float compY = 0.0f;
+        if (UWindow* compass = findVisibleWindowByClass(s.root, nameHudCompassDisplay, 0.0f, 0.0f, compX, compY)) {
+            if (vx >= compX && vx < compX + compass->width() && vy >= compY && vy < compY + compass->height()) {
+                return HudTouchHit { 0, compassOpensImages ? "ShowImagesWindow" : "ShowGoalsWindow" };
+            }
+        }
+
+        // 3. Active Augmentations HUD (top-right) -> toggle each individual aug icon
+        static const Name nameHudActiveItemsDisplay("HUDActiveItemsDisplay");
+        float activeX = 0.0f;
+        float activeY = 0.0f;
+        if (UWindow* activeDisp = findVisibleWindowByClass(s.root, nameHudActiveItemsDisplay, 0.0f, 0.0f, activeX, activeY)) {
+            if (uint8_t augKey = hitTestHudActiveAugs(activeDisp, activeX - activeDisp->usedX, activeY - activeDisp->usedY, vx, vy)) {
+                return HudTouchHit { augKey, nullptr };
+            }
+        }
+
+        return {};
     }
 
     UObject* rootWindow()

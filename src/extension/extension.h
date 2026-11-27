@@ -55,7 +55,13 @@ namespace dx {
         void mouseMove(float x, float y);
         bool cursorPosition(float& x, float& y);
         bool mouseButton(uint8_t key, bool pressed);
+        struct HudTouchHit {
+            uint8_t key = 0;
+            const char* command = nullptr;
+        };
+
         uint8_t hitTestHudBeltKey(float screenX, float screenY);
+        HudTouchHit hitTestHudTouch(float screenX, float screenY, bool compassOpensImages);
         void setTouchInputActive(bool active);
         UObject* rootWindow();
         bool wantsMouse();
